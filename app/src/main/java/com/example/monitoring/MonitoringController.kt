@@ -42,7 +42,7 @@ class MonitoringController(
 
     private var loopJob: Job? = null
     private val sessionCounter = AtomicLong(0)
-    private val loopMutex = Mutex()
+    private val lifecycleMutex = Mutex()
 
     val isMonitoring: Boolean
         get() = when (_state.value) {
@@ -56,7 +56,8 @@ class MonitoringController(
     /**
      * Starts the sequential capture -> AI -> delay -> capture loop.
      * Guaranteed that:
-     * - Stale jobs from prior sessions cannot publish results, bitmaps, or state.
+     * - Stale jobs from prior sessions cannot publish results, bitmaps, state, or errors.
+     * - Only exactly ONE active monitoring loop can run.
      * - Delay strictly runs AFTER the AI analysis finishes.
      */
     fun startMonitoring(
@@ -64,14 +65,16 @@ class MonitoringController(
         settingsProvider: () -> CaptureSettings
     ) {
         coroutineScope.launch {
-            loopMutex.withLock {
+            lifecycleMutex.withLock {
                 // Cancel existing job and advance session generation
                 val sessionId = sessionCounter.incrementAndGet()
-                loopJob?.cancel()
+                val prevJob = loopJob
+                loopJob = null
+                prevJob?.cancel()
 
                 _state.value = MonitoringState.Starting
 
-                loopJob = coroutineScope.launch(Dispatchers.Default) {
+                val newJob = coroutineScope.launch(Dispatchers.Default) {
                     try {
                         // Wait for ScreenCaptureEngine to be ready
                         var waitAttempts = 0
@@ -95,7 +98,7 @@ class MonitoringController(
                             _state.value = MonitoringState.Capturing
 
                             val captureResult = ScreenCaptureEngine.captureSingleFrame()
-                            if (sessionId != sessionCounter.get()) return@launch
+                            if (sessionId != sessionCounter.get() || !isActive) return@launch
 
                             val capturedBitmap = when (captureResult) {
                                 is CaptureResult.Success -> {
@@ -111,8 +114,8 @@ class MonitoringController(
                                 }
                             }
 
-                            // 2. SEND TO AI
-                            if (sessionId != sessionCounter.get()) return@launch
+                            // 2. PREPARE CONTEXT & SETTINGS
+                            if (sessionId != sessionCounter.get() || !isActive) return@launch
                             val currentContext = contextProvider()
                             val currentSettings = settingsProvider()
                             _state.value = MonitoringState.Analyzing(startTimeMs = System.currentTimeMillis())
@@ -156,6 +159,8 @@ class MonitoringController(
                         }
                     }
                 }
+
+                loopJob = newJob
             }
         }
     }
@@ -165,8 +170,9 @@ class MonitoringController(
      */
     fun stopMonitoring() {
         sessionCounter.incrementAndGet()
-        loopJob?.cancel()
+        val job = loopJob
         loopJob = null
+        job?.cancel()
         _state.value = MonitoringState.Idle
     }
 

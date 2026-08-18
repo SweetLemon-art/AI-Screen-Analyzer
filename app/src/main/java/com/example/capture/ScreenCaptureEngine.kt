@@ -12,11 +12,14 @@ import android.os.Looper
 import android.util.DisplayMetrics
 import android.view.WindowManager
 import com.example.image.ImageProcessor
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.coroutines.resume
@@ -26,8 +29,10 @@ import kotlin.coroutines.resume
  *
  * INVARIANTS:
  * - Exactly ONE VirtualDisplay per MediaProjection session.
- * - [captureSingleFrame] NEVER recreates VirtualDisplay/ImageReader.
+ * - [captureSingleFrame] NEVER creates or recreates VirtualDisplay.
+ * - Uses real VirtualDisplay.Callback and MediaProjection.Callback for safe teardown.
  * - [stop] is strictly idempotent and safe when called repeatedly.
+ * - Synchronized with a Mutex so only one frame capture occurs at any instant.
  */
 object ScreenCaptureEngine {
 
@@ -51,6 +56,7 @@ object ScreenCaptureEngine {
     private var onProjectionStopCallback: (() -> Unit)? = null
 
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val captureMutex = Mutex()
 
     private val projectionCallback = object : MediaProjection.Callback() {
         override fun onStop() {
@@ -60,6 +66,25 @@ object ScreenCaptureEngine {
             val callback = onProjectionStopCallback
             onProjectionStopCallback = null
             callback?.invoke()
+        }
+    }
+
+    private val virtualDisplayCallback = object : VirtualDisplay.Callback() {
+        override fun onStopped() {
+            super.onStopped()
+            _isReady.value = false
+            cleanupResources()
+            val callback = onProjectionStopCallback
+            onProjectionStopCallback = null
+            callback?.invoke()
+        }
+
+        override fun onPaused() {
+            super.onPaused()
+        }
+
+        override fun onResumed() {
+            super.onResumed()
         }
     }
 
@@ -130,7 +155,7 @@ object ScreenCaptureEngine {
                 screenDensity,
                 DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
                 reader.surface,
-                null,
+                virtualDisplayCallback,
                 mainHandler
             )
             this.virtualDisplay = vDisplay
@@ -142,71 +167,79 @@ object ScreenCaptureEngine {
 
     /**
      * Captures exactly ONE frame from the screen using the existing VirtualDisplay/ImageReader.
-     * NEVER recreates VirtualDisplay or ImageReader.
+     * NEVER creates or recreates VirtualDisplay or ImageReader.
+     * Guaranteed single execution via [captureMutex].
      */
     suspend fun captureSingleFrame(): CaptureResult = withContext(Dispatchers.Default) {
-        val reader = imageReader
-        val projection = mediaProjection
-        val vDisplay = virtualDisplay
+        captureMutex.withLock {
+            val reader = imageReader
+            val projection = mediaProjection
+            val vDisplay = virtualDisplay
 
-        if (reader == null || projection == null || vDisplay == null || !_isReady.value) {
-            return@withContext CaptureResult.Error("Screen capture session is not active or permission was revoked.")
-        }
-
-        try {
-            // Check if a frame is immediately available in the buffer
-            val immediateImage = try {
-                reader.acquireLatestImage()
-            } catch (e: Exception) {
-                null
+            if (reader == null || projection == null || vDisplay == null || !_isReady.value) {
+                return@withContext CaptureResult.Error("Screen capture session is not active or permission was revoked.")
             }
 
-            if (immediateImage != null) {
-                val bitmap = ImageProcessor.convertImageToBitmap(immediateImage)
-                return@withContext if (bitmap != null) {
-                    CaptureResult.Success(bitmap)
-                } else {
-                    CaptureResult.Error("Failed to convert captured frame buffer to Bitmap.")
+            try {
+                // Check if a frame is immediately available in the buffer
+                val immediateImage = try {
+                    reader.acquireLatestImage()
+                } catch (e: Exception) {
+                    null
                 }
-            }
 
-            // Await next frame with a 3-second timeout
-            val capturedBitmap = withTimeoutOrNull(3000L) {
-                suspendCancellableCoroutine<Bitmap?> { cont ->
-                    val listener = ImageReader.OnImageAvailableListener { r ->
-                        try {
-                            val img = r.acquireLatestImage()
-                            if (img != null) {
-                                r.setOnImageAvailableListener(null, null)
-                                val bmp = ImageProcessor.convertImageToBitmap(img)
+                if (immediateImage != null) {
+                    val bitmap = ImageProcessor.convertImageToBitmap(immediateImage)
+                    return@withContext if (bitmap != null) {
+                        CaptureResult.Success(bitmap)
+                    } else {
+                        CaptureResult.Error("Failed to convert captured frame buffer to Bitmap.")
+                    }
+                }
+
+                // Await next frame with a 3-second timeout
+                val capturedBitmap = withTimeoutOrNull(3000L) {
+                    suspendCancellableCoroutine<Bitmap?> { cont ->
+                        val listener = ImageReader.OnImageAvailableListener { r ->
+                            try {
+                                val img = r.acquireLatestImage()
+                                if (img != null) {
+                                    r.setOnImageAvailableListener(null, null)
+                                    val bmp = ImageProcessor.convertImageToBitmap(img)
+                                    if (cont.isActive) {
+                                        cont.resume(bmp)
+                                    } else {
+                                        // Continuation was already cancelled; no caller owns bmp, so recycle it safely
+                                        bmp?.let { if (!it.isRecycled) it.recycle() }
+                                    }
+                                }
+                            } catch (e: Exception) {
                                 if (cont.isActive) {
-                                    cont.resume(bmp)
+                                    cont.resume(null)
                                 }
                             }
-                        } catch (e: Exception) {
-                            if (cont.isActive) {
-                                cont.resume(null)
-                            }
+                        }
+
+                        reader.setOnImageAvailableListener(listener, mainHandler)
+
+                        cont.invokeOnCancellation {
+                            try {
+                                reader.setOnImageAvailableListener(null, null)
+                            } catch (ignored: Exception) {}
                         }
                     }
-
-                    reader.setOnImageAvailableListener(listener, mainHandler)
-
-                    cont.invokeOnCancellation {
-                        try {
-                            reader.setOnImageAvailableListener(null, null)
-                        } catch (ignored: Exception) {}
-                    }
                 }
-            }
 
-            if (capturedBitmap != null) {
-                CaptureResult.Success(capturedBitmap)
-            } else {
-                CaptureResult.Error("Timeout waiting for display frame.")
+                if (capturedBitmap != null) {
+                    CaptureResult.Success(capturedBitmap)
+                } else {
+                    CaptureResult.Error("Timeout waiting for display frame.")
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                CaptureResult.Error("Screen capture error: ${e.localizedMessage ?: e.message}")
             }
-        } catch (e: Exception) {
-            CaptureResult.Error("Screen capture error: ${e.localizedMessage ?: e.message}")
         }
     }
 

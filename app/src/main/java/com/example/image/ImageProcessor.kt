@@ -12,8 +12,10 @@ object ImageProcessor {
      * Converts an android.media.Image from ImageReader (PixelFormat.RGBA_8888) to an Android Bitmap.
      * Accurately handles rowStride padding where rowStride != width * pixelStride.
      * Guaranteed to close the provided [image] inside a try/finally block to prevent memory leaks.
+     * If tempBitmap is allocated and subsequent operations throw, tempBitmap is recycled before returning null.
      */
     fun convertImageToBitmap(image: Image): Bitmap? {
+        var tempBitmap: Bitmap? = null
         return try {
             val planes = image.planes
             if (planes.isEmpty()) return null
@@ -26,17 +28,25 @@ object ImageProcessor {
             val bitmapWidth = image.width + rowPadding / pixelStride
             val bitmapHeight = image.height
 
-            val tempBitmap = Bitmap.createBitmap(bitmapWidth, bitmapHeight, Bitmap.Config.ARGB_8888)
+            tempBitmap = Bitmap.createBitmap(bitmapWidth, bitmapHeight, Bitmap.Config.ARGB_8888)
             tempBitmap.copyPixelsFromBuffer(buffer)
 
             if (bitmapWidth != image.width) {
                 val cleanBitmap = Bitmap.createBitmap(tempBitmap, 0, 0, image.width, image.height)
                 tempBitmap.recycle()
+                tempBitmap = null
                 cleanBitmap
             } else {
-                tempBitmap
+                val result = tempBitmap
+                tempBitmap = null
+                result
             }
         } catch (e: Exception) {
+            tempBitmap?.let {
+                if (!it.isRecycled) {
+                    it.recycle()
+                }
+            }
             null
         } finally {
             try {

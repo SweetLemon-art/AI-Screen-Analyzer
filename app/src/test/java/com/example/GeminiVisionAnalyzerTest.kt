@@ -7,13 +7,18 @@ import com.example.ai.AnalysisResult
 import com.example.ai.ConnectionTestResult
 import com.example.ai.GeminiVisionAnalyzer
 import com.example.ai.VisionAnalyzer
+import com.example.capture.CaptureResult
+import com.example.capture.ScreenCaptureEngine
 import com.example.data.AnalysisContext
 import com.example.data.CaptureSettings
+import com.example.image.ImageProcessor
 import com.example.monitoring.MonitoringController
 import com.example.monitoring.MonitoringState
 import com.example.security.GeminiApiKeyStore
-import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
@@ -65,10 +70,58 @@ class GeminiVisionAnalyzerTest {
     }
 }
 
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [34])
+class ImageProcessorTest {
+
+    @Test
+    fun testProcessForGeminiBase64DoesNotRecycleOriginalBitmap() {
+        val original = Bitmap.createBitmap(500, 500, Bitmap.Config.ARGB_8888)
+        val base64 = ImageProcessor.processForGeminiBase64(original, maxDimension = 300, quality = 80)
+
+        assertNotNull(base64)
+        assertTrue(base64.isNotEmpty())
+        assertFalse("Original bitmap must NOT be recycled by ImageProcessor", original.isRecycled)
+    }
+
+    @Test
+    fun testProcessForGeminiBase64WithoutScaling() {
+        val original = Bitmap.createBitmap(200, 200, Bitmap.Config.ARGB_8888)
+        val base64 = ImageProcessor.processForGeminiBase64(original, maxDimension = 500, quality = 90)
+
+        assertNotNull(base64)
+        assertTrue(base64.isNotEmpty())
+        assertFalse(original.isRecycled)
+    }
+}
+
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [34])
+class ScreenCaptureEngineLifecycleTest {
+
+    @Test
+    fun testIdempotentStop() {
+        // Calling stop multiple times without initialize must be completely safe
+        ScreenCaptureEngine.stop()
+        ScreenCaptureEngine.stop()
+        ScreenCaptureEngine.stop()
+        assertFalse(ScreenCaptureEngine.isReady.value)
+    }
+
+    @Test
+    fun testCaptureWhenNotReadyReturnsErrorWithoutRecreating() = runTest {
+        ScreenCaptureEngine.stop()
+        val result = ScreenCaptureEngine.captureSingleFrame()
+
+        assertTrue(result is CaptureResult.Error)
+        assertFalse(ScreenCaptureEngine.isReady.value)
+    }
+}
+
 @OptIn(ExperimentalCoroutinesApi::class)
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
-class MonitoringControllerRaceTest {
+class MonitoringControllerLifecycleRaceTest {
 
     @Test
     fun testStartStopStartLifecycleNoLeak() = runTest {
@@ -103,13 +156,85 @@ class MonitoringControllerRaceTest {
         val controller = MonitoringController(fakeAnalyzer, testScope)
         assertEquals(MonitoringState.Idle, controller.state.value)
 
-        // Stop while idle is completely safe
+        // 1. Rapid START -> STOP -> START cycle
+        controller.startMonitoring(
+            contextProvider = { AnalysisContext.DEFAULT },
+            settingsProvider = { CaptureSettings.DEFAULT }
+        )
         controller.stopMonitoring()
         assertEquals(MonitoringState.Idle, controller.state.value)
 
-        // Multiple stop calls are safe and idempotent
-        controller.stopMonitoring()
+        controller.startMonitoring(
+            contextProvider = { AnalysisContext.DEFAULT },
+            settingsProvider = { CaptureSettings.DEFAULT }
+        )
+        advanceUntilIdle()
+
+        // Verify clean state
         controller.stopMonitoring()
         assertEquals(MonitoringState.Idle, controller.state.value)
+    }
+
+    @Test
+    fun testStopDuringGeminiAnalysisDoesNotPublishStaleResult() = runTest {
+        val testDispatcher = StandardTestDispatcher(testScheduler)
+        val testScope = TestScope(testDispatcher)
+
+        val analysisStarted = CompletableDeferred<Unit>()
+        val analysisProceed = CompletableDeferred<Unit>()
+        var analysisCompleted = false
+
+        val fakeAnalyzer = object : VisionAnalyzer {
+            override suspend fun analyze(
+                bitmap: Bitmap,
+                context: AnalysisContext,
+                settings: CaptureSettings
+            ): AnalysisResult {
+                analysisStarted.complete(Unit)
+                analysisProceed.await()
+                analysisCompleted = true
+                return AnalysisResult(
+                    contextName = context.name,
+                    summary = "Stale Result",
+                    observations = emptyList(),
+                    conclusion = "Stale",
+                    rawResponse = "",
+                    isSuccess = true,
+                    errorMessage = null,
+                    processingDurationMs = 50L
+                )
+            }
+
+            override suspend fun testConnection(): ConnectionTestResult {
+                return ConnectionTestResult.Success("OK")
+            }
+        }
+
+        val controller = MonitoringController(fakeAnalyzer, testScope)
+
+        // Simulate ready engine state
+        controller.startMonitoring(
+            contextProvider = { AnalysisContext.DEFAULT },
+            settingsProvider = { CaptureSettings.DEFAULT }
+        )
+        advanceTimeBy(100)
+
+        // Stopping while in progress
+        controller.stopMonitoring()
+        assertEquals(MonitoringState.Idle, controller.state.value)
+        assertFalse(controller.isMonitoring)
+    }
+
+    @Test
+    fun testTimerBoundsClamp() {
+        val settingsMin = CaptureSettings.createSafe(delay = -10, resolution = 100, quality = 10)
+        assertEquals(1, settingsMin.delaySeconds)
+        assertEquals(480, settingsMin.maxResolutionDimension)
+        assertEquals(40, settingsMin.compressionQuality)
+
+        val settingsMax = CaptureSettings.createSafe(delay = 1000, resolution = 5000, quality = 200)
+        assertEquals(600, settingsMax.delaySeconds)
+        assertEquals(2160, settingsMax.maxResolutionDimension)
+        assertEquals(100, settingsMax.compressionQuality)
     }
 }
