@@ -1,70 +1,86 @@
 package com.example.ai
 
 import android.graphics.Bitmap
-import com.example.BuildConfig
 import com.example.data.AnalysisContext
+import com.example.data.CaptureSettings
 import com.example.image.ImageProcessor
+import com.example.security.GeminiApiKeyStore
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.IOException
 import java.util.concurrent.TimeUnit
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
-class GeminiVisionAnalyzer : VisionAnalyzer {
+class GeminiVisionAnalyzer(
+    private val apiKeyStore: GeminiApiKeyStore
+) : VisionAnalyzer {
 
     private val okHttpClient = OkHttpClient.Builder()
-        .connectTimeout(60, TimeUnit.SECONDS)
-        .readTimeout(60, TimeUnit.SECONDS)
-        .writeTimeout(60, TimeUnit.SECONDS)
+        .connectTimeout(30, TimeUnit.SECONDS)
+        .readTimeout(30, TimeUnit.SECONDS)
+        .writeTimeout(30, TimeUnit.SECONDS)
         .build()
 
-    override suspend fun analyze(bitmap: Bitmap, context: AnalysisContext): AnalysisResult = withContext(Dispatchers.IO) {
-        val startTime = System.currentTimeMillis()
-        val apiKey = BuildConfig.GEMINI_API_KEY.trim()
+    companion object {
+        private const val GEMINI_MODEL = "gemini-2.5-flash"
+        private const val API_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/$GEMINI_MODEL:generateContent"
+    }
 
-        if (apiKey.isEmpty() || apiKey == "MY_GEMINI_API_KEY" || apiKey.contains("placeholder", ignoreCase = true)) {
+    override suspend fun analyze(
+        bitmap: Bitmap,
+        context: AnalysisContext,
+        settings: CaptureSettings
+    ): AnalysisResult = withContext(Dispatchers.IO) {
+        val startTime = System.currentTimeMillis()
+        val apiKey = apiKeyStore.getApiKey()
+
+        if (apiKey.isNullOrBlank()) {
             val duration = System.currentTimeMillis() - startTime
             return@withContext AnalysisResult(
                 contextName = context.name,
-                summary = "Gemini API key is not configured.",
+                summary = "API Key not configured",
                 observations = listOf(
-                    "Please configure your GEMINI_API_KEY in the Secrets panel in Google AI Studio.",
-                    "Ensure .env or Secrets injection is active."
+                    "No Gemini API key is currently saved on this device.",
+                    "Please navigate to Settings and enter your Gemini API key."
                 ),
-                conclusion = "Add a valid Gemini API key to enable live AI vision processing.",
-                rawResponse = "Missing API Key: GEMINI_API_KEY is unset or placeholder.",
+                conclusion = "Enter your API key in Settings to begin live analysis.",
+                rawResponse = "",
                 isSuccess = false,
-                errorMessage = "Missing or placeholder GEMINI_API_KEY. Please provide an API key via the Secrets panel.",
+                errorMessage = "API key missing. Configure your Gemini API key in Settings.",
                 processingDurationMs = duration
             )
         }
 
         try {
-            // Process and downscale bitmap to optimize latency
+            // Process and scale bitmap according to user's CaptureSettings
             val (_, base64Image) = ImageProcessor.processForGemini(
                 rawBitmap = bitmap,
-                maxDimension = 1080,
-                quality = 82
+                maxDimension = settings.maxResolutionDimension,
+                quality = settings.compressionQuality
             )
 
             val promptText = buildString {
-                appendLine("You are an expert real-time multimodal visual screen analyzer.")
+                appendLine("You are an expert multimodal visual screen analyzer.")
                 appendLine("Context Name: ${context.name}")
                 appendLine("User Instructions: ${context.instructions}")
-                appendLine("Target Language: ${context.language}")
+                appendLine("Target Response Language: ${context.language}")
                 appendLine()
                 appendLine("Carefully inspect the provided Android screen capture. Focus strictly on the user instructions above.")
-                appendLine("Structure your answer in the specified target language (${context.language}) with:")
-                appendLine("SUMMARY: (A 1-2 sentence direct summary of what is happening on screen relevant to the context)")
-                appendLine("OBSERVATIONS:")
-                appendLine("- (Key visual point 1)")
-                appendLine("- (Key visual point 2)")
-                appendLine("- (Key visual point 3)")
-                appendLine("CONCLUSION: (Main insight, status, or actionable takeaway)")
+                appendLine("Respond with a structured JSON object conforming to the schema:")
+                appendLine("- summary: Concise 1-2 sentence summary of what is happening on screen relevant to user instructions.")
+                appendLine("- observations: A list of key visual findings / points.")
+                appendLine("- conclusion: Main takeaway, status, or actionable insight.")
             }
 
             val requestJson = JSONObject().apply {
@@ -73,8 +89,7 @@ class GeminiVisionAnalyzer : VisionAnalyzer {
                 val partsArray = JSONArray()
 
                 // Text prompt part
-                val textPart = JSONObject().put("text", promptText)
-                partsArray.put(textPart)
+                partsArray.put(JSONObject().put("text", promptText))
 
                 // Inline image part
                 val imagePart = JSONObject().apply {
@@ -90,75 +105,183 @@ class GeminiVisionAnalyzer : VisionAnalyzer {
                 contentsArray.put(contentObj)
                 put("contents", contentsArray)
 
+                // Enforce structured JSON response
+                val responseSchema = JSONObject().apply {
+                    put("type", "OBJECT")
+                    val properties = JSONObject().apply {
+                        put("summary", JSONObject().apply {
+                            put("type", "STRING")
+                            put("description", "A concise summary of what is visible")
+                        })
+                        put("observations", JSONObject().apply {
+                            put("type", "ARRAY")
+                            put("items", JSONObject().apply { put("type", "STRING") })
+                            put("description", "Key visual points observed")
+                        })
+                        put("conclusion", JSONObject().apply {
+                            put("type", "STRING")
+                            put("description", "Actionable takeaway or status")
+                        })
+                    }
+                    put("properties", properties)
+                    put("required", JSONArray().put("summary").put("observations").put("conclusion"))
+                }
+
                 val generationConfig = JSONObject().apply {
+                    put("response_mime_type", "application/json")
+                    put("response_schema", responseSchema)
                     put("temperature", 0.2)
-                    put("topP", 0.95)
                 }
                 put("generationConfig", generationConfig)
             }
 
             val mediaType = "application/json; charset=utf-8".toMediaType()
             val requestBody = requestJson.toString().toRequestBody(mediaType)
-            val url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=$apiKey"
 
             val request = Request.Builder()
-                .url(url)
+                .url(API_ENDPOINT)
+                .addHeader("x-goog-api-key", apiKey)
                 .post(requestBody)
                 .build()
 
-            val response = okHttpClient.newCall(request).execute()
-            val responseBodyString = response.body?.string() ?: ""
+            val response = executeCancellationAwareCall(request)
             val duration = System.currentTimeMillis() - startTime
+            val responseBodyString = response.body?.string().orEmpty()
 
             if (!response.isSuccessful) {
-                val errorMsg = try {
-                    val errJson = JSONObject(responseBodyString)
-                    errJson.optJSONObject("error")?.optString("message") ?: "HTTP ${response.code}: ${response.message}"
-                } catch (e: Exception) {
-                    "HTTP ${response.code}: ${response.message}"
-                }
-
+                val userErrorMessage = sanitizeHttpError(response.code, responseBodyString)
                 return@withContext AnalysisResult(
                     contextName = context.name,
-                    summary = "Gemini API call failed (HTTP ${response.code}).",
-                    observations = listOf("Error: $errorMsg"),
-                    conclusion = "Check your network connection and API key quota.",
-                    rawResponse = responseBodyString,
+                    summary = "Analysis request failed (${response.code})",
+                    observations = listOf(userErrorMessage),
+                    conclusion = "Check your API key and network connectivity.",
+                    rawResponse = "",
                     isSuccess = false,
-                    errorMessage = errorMsg,
+                    errorMessage = userErrorMessage,
                     processingDurationMs = duration
                 )
             }
 
-            val parsedText = parseGeminiResponseText(responseBodyString)
-            val (summary, observations, conclusion) = extractSections(parsedText)
+            val rawText = parseGeminiResponseContent(responseBodyString)
+            val (summary, observations, conclusion) = parseStructuredResponse(rawText)
 
             AnalysisResult(
                 contextName = context.name,
-                summary = summary.ifBlank { "Screen analyzed according to instructions." },
+                summary = summary.ifBlank { "Screen analyzed successfully." },
                 observations = observations,
                 conclusion = conclusion,
-                rawResponse = parsedText,
+                rawResponse = rawText,
                 isSuccess = true,
                 errorMessage = null,
                 processingDurationMs = duration
             )
         } catch (e: Exception) {
             val duration = System.currentTimeMillis() - startTime
+            val safeMessage = when (e) {
+                is java.net.UnknownHostException -> "No internet connection. Please verify your network."
+                is java.net.SocketTimeoutException -> "Request timed out while waiting for Gemini response."
+                is kotlinx.coroutines.CancellationException -> "Analysis cancelled."
+                else -> "Network communication error. Please try again."
+            }
             AnalysisResult(
                 contextName = context.name,
-                summary = "Failed to complete AI screen analysis.",
-                observations = listOf("Exception: ${e.localizedMessage ?: e.message}"),
+                summary = "Failed to complete AI screen analysis",
+                observations = listOf(safeMessage),
                 conclusion = "Please verify network connectivity and try again.",
-                rawResponse = e.stackTraceToString(),
+                rawResponse = "",
                 isSuccess = false,
-                errorMessage = e.localizedMessage ?: "Unknown network error",
+                errorMessage = safeMessage,
                 processingDurationMs = duration
             )
         }
     }
 
-    private fun parseGeminiResponseText(jsonString: String): String {
+    override suspend fun testConnection(): ConnectionTestResult = withContext(Dispatchers.IO) {
+        val apiKey = apiKeyStore.getApiKey()
+        if (apiKey.isNullOrBlank()) {
+            return@withContext ConnectionTestResult.Error("API key is not configured. Please enter a valid Gemini API key.")
+        }
+
+        try {
+            val requestJson = JSONObject().apply {
+                val contents = JSONArray().apply {
+                    val content = JSONObject().apply {
+                        val parts = JSONArray().apply {
+                            put(JSONObject().put("text", "Respond with 'OK' if you can read this."))
+                        }
+                        put("parts", parts)
+                    }
+                    put(content)
+                }
+                put("contents", contents)
+            }
+
+            val mediaType = "application/json; charset=utf-8".toMediaType()
+            val requestBody = requestJson.toString().toRequestBody(mediaType)
+
+            val request = Request.Builder()
+                .url(API_ENDPOINT)
+                .addHeader("x-goog-api-key", apiKey)
+                .post(requestBody)
+                .build()
+
+            val response = executeCancellationAwareCall(request)
+            val body = response.body?.string().orEmpty()
+
+            if (response.isSuccessful) {
+                ConnectionTestResult.Success("Connection successful! Gemini API is active and authorized.")
+            } else {
+                val safeError = sanitizeHttpError(response.code, body)
+                ConnectionTestResult.Error("API validation failed: $safeError")
+            }
+        } catch (e: Exception) {
+            val safeError = when (e) {
+                is java.net.UnknownHostException -> "Network error: Unable to resolve Gemini server. Check your internet connection."
+                is java.net.SocketTimeoutException -> "Network timeout while reaching Gemini server."
+                else -> "Connection test failed. Check network connection."
+            }
+            ConnectionTestResult.Error(safeError)
+        }
+    }
+
+    private suspend fun executeCancellationAwareCall(request: Request): Response {
+        return suspendCancellableCoroutine { continuation ->
+            val call = okHttpClient.newCall(request)
+            continuation.invokeOnCancellation {
+                call.cancel()
+            }
+            call.enqueue(object : Callback {
+                override fun onResponse(call: Call, response: Response) {
+                    continuation.resume(response)
+                }
+
+                override fun onFailure(call: Call, e: IOException) {
+                    if (continuation.isCancelled) return
+                    continuation.resumeWithException(e)
+                }
+            })
+        }
+    }
+
+    private fun sanitizeHttpError(statusCode: Int, responseBody: String): String {
+        val serverMessage = try {
+            val json = JSONObject(responseBody)
+            json.optJSONObject("error")?.optString("message")
+        } catch (ignored: Exception) {
+            null
+        }
+
+        return when (statusCode) {
+            400 -> "Invalid request format: ${serverMessage ?: "Bad request"}"
+            401, 403 -> "Invalid or unauthorized API key. Please check your Gemini API key in Settings."
+            404 -> "Gemini model endpoint not found."
+            429 -> "Rate limit or quota exceeded. Please increase the delay in Settings or check your API quota."
+            500, 503, 504 -> "Gemini service temporarily unavailable. Please try again later."
+            else -> "HTTP $statusCode: ${serverMessage ?: "Unexpected API error"}"
+        }
+    }
+
+    private fun parseGeminiResponseContent(jsonString: String): String {
         return try {
             val root = JSONObject(jsonString)
             val candidates = root.optJSONArray("candidates")
@@ -167,28 +290,63 @@ class GeminiVisionAnalyzer : VisionAnalyzer {
                 val content = firstCandidate.optJSONObject("content")
                 val parts = content?.optJSONArray("parts")
                 if (parts != null && parts.length() > 0) {
-                    val stringBuilder = StringBuilder()
+                    val sb = StringBuilder()
                     for (i in 0 until parts.length()) {
-                        val part = parts.getJSONObject(i)
-                        val text = part.optString("text", "")
-                        stringBuilder.append(text)
+                        val text = parts.getJSONObject(i).optString("text", "")
+                        sb.append(text)
                     }
-                    return stringBuilder.toString().trim()
+                    return sb.toString().trim()
                 }
             }
-            "No text returned by AI."
+            ""
         } catch (e: Exception) {
-            "Unable to parse response: ${e.message}"
+            ""
         }
     }
 
-    private fun extractSections(rawText: String): Triple<String, List<String>, String> {
-        val lines = rawText.lines().map { it.trim() }.filter { it.isNotEmpty() }
+    private fun parseStructuredResponse(rawContent: String): Triple<String, List<String>, String> {
+        if (rawContent.isBlank()) {
+            return Triple("No response content returned by AI.", emptyList(), "")
+        }
+
+        // Try direct JSON object parsing
+        try {
+            // Strip markdown backticks if present (e.g. ```json ... ```)
+            val cleanJson = rawContent.trim()
+                .removePrefix("```json")
+                .removePrefix("```JSON")
+                .removePrefix("```")
+                .removeSuffix("```")
+                .trim()
+
+            val json = JSONObject(cleanJson)
+            val summary = json.optString("summary", "").trim()
+            val observationsList = mutableListOf<String>()
+            val observationsArray = json.optJSONArray("observations")
+            if (observationsArray != null) {
+                for (i in 0 until observationsArray.length()) {
+                    val obs = observationsArray.optString(i, "").trim()
+                    if (obs.isNotEmpty()) {
+                        observationsList.add(obs)
+                    }
+                }
+            }
+            val conclusion = json.optString("conclusion", "").trim()
+
+            if (summary.isNotEmpty() || observationsList.isNotEmpty() || conclusion.isNotEmpty()) {
+                return Triple(summary, observationsList, conclusion)
+            }
+        } catch (ignored: Exception) {
+            // Fall back to line-by-line parsing if model responded in free-form text
+        }
+
+        // Fallback text parser
+        val lines = rawContent.lines().map { it.trim() }.filter { it.isNotEmpty() }
         var summary = ""
         val observations = mutableListOf<String>()
         var conclusion = ""
+        var currentSection = ""
 
-        var currentSection = "" // "summary", "observations", "conclusion"
         val summaryBuffer = StringBuilder()
         val conclusionBuffer = StringBuilder()
 
@@ -213,9 +371,7 @@ class GeminiVisionAnalyzer : VisionAnalyzer {
                         "summary" -> summaryBuffer.append(line).append(" ")
                         "observations" -> {
                             val cleanLine = line.removePrefix("-").removePrefix("*").removePrefix("•").trim()
-                            if (cleanLine.isNotEmpty()) {
-                                observations.add(cleanLine)
-                            }
+                            if (cleanLine.isNotEmpty()) observations.add(cleanLine)
                         }
                         "conclusion" -> conclusionBuffer.append(line).append(" ")
                         else -> {
@@ -233,8 +389,8 @@ class GeminiVisionAnalyzer : VisionAnalyzer {
         summary = summaryBuffer.toString().trim()
         conclusion = conclusionBuffer.toString().trim()
 
-        if (summary.isEmpty() && rawText.isNotEmpty()) {
-            summary = rawText.take(200) + if (rawText.length > 200) "..." else ""
+        if (summary.isEmpty()) {
+            summary = rawContent.take(200) + if (rawContent.length > 200) "..." else ""
         }
 
         return Triple(summary, observations, conclusion)

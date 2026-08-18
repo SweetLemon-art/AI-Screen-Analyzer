@@ -6,13 +6,16 @@ import android.content.Intent
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.ai.AnalysisResult
+import com.example.ai.ConnectionTestResult
 import com.example.ai.GeminiVisionAnalyzer
 import com.example.capture.ScreenCaptureEngine
 import com.example.capture.ScreenCaptureService
 import com.example.data.AnalysisContext
 import com.example.data.CaptureSettings
+import com.example.data.SettingsRepository
 import com.example.monitoring.MonitoringController
 import com.example.monitoring.MonitoringState
+import com.example.security.GeminiApiKeyStore
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -20,22 +23,41 @@ import kotlinx.coroutines.launch
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
-    private val visionAnalyzer = GeminiVisionAnalyzer()
+    val apiKeyStore = GeminiApiKeyStore(application)
+    private val settingsRepository = SettingsRepository(application)
+    val visionAnalyzer = GeminiVisionAnalyzer(apiKeyStore)
     val controller = MonitoringController(visionAnalyzer, viewModelScope)
 
-    // Active analysis context
-    private val _currentContext = MutableStateFlow(AnalysisContext.DEFAULT)
-    val currentContext: StateFlow<AnalysisContext> = _currentContext.asStateFlow()
-
-    // Available contexts (presets + user custom)
-    private val _savedContexts = MutableStateFlow(AnalysisContext.DEFAULT_PRESETS)
+    // Saved contexts & selected context
+    private val _savedContexts = MutableStateFlow(settingsRepository.loadContexts())
     val savedContexts: StateFlow<List<AnalysisContext>> = _savedContexts.asStateFlow()
 
-    // Capture and delay settings
-    private val _settings = MutableStateFlow(CaptureSettings.DEFAULT)
+    private val _currentContext = MutableStateFlow(
+        _savedContexts.value.find { it.id == settingsRepository.loadSelectedContextId() }
+            ?: _savedContexts.value.firstOrNull()
+            ?: AnalysisContext.DEFAULT
+    )
+    val currentContext: StateFlow<AnalysisContext> = _currentContext.asStateFlow()
+
+    // Capture settings
+    private val _settings = MutableStateFlow(settingsRepository.loadSettings())
     val settings: StateFlow<CaptureSettings> = _settings.asStateFlow()
 
-    // Expose monitoring state flows directly
+    // API Key status StateFlow to trigger reactive recompositions in SettingsScreen
+    private val _hasApiKey = MutableStateFlow(apiKeyStore.hasApiKey())
+    val hasApiKey: StateFlow<Boolean> = _hasApiKey.asStateFlow()
+
+    private val _maskedApiKey = MutableStateFlow(apiKeyStore.getMaskedApiKey())
+    val maskedApiKey: StateFlow<String> = _maskedApiKey.asStateFlow()
+
+    // Connection testing state
+    private val _isTestingConnection = MutableStateFlow(false)
+    val isTestingConnection: StateFlow<Boolean> = _isTestingConnection.asStateFlow()
+
+    private val _testResult = MutableStateFlow<ConnectionTestResult?>(null)
+    val testResult: StateFlow<ConnectionTestResult?> = _testResult.asStateFlow()
+
+    // Monitoring State flows
     val monitoringState: StateFlow<MonitoringState> = controller.state
     val latestBitmap = controller.latestBitmap
     val latestResult: StateFlow<AnalysisResult?> = controller.latestResult
@@ -52,40 +74,77 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun selectContext(context: AnalysisContext) {
         _currentContext.value = context
+        settingsRepository.saveSelectedContextId(context.id)
     }
 
     fun saveAndSelectContext(name: String, instructions: String, language: String) {
         val newContext = AnalysisContext(
             id = "custom_${System.currentTimeMillis()}",
-            name = name.trim().ifBlank { "Custom Analysis" },
+            name = name.trim().ifBlank { "Custom Context" },
             instructions = instructions.trim().ifBlank { "Analyze what is visible on screen." },
             language = language.trim().ifBlank { "English" },
             isPreset = false
         )
-        _savedContexts.value = listOf(newContext) + _savedContexts.value.filter { it.id != newContext.id }
-        _currentContext.value = newContext
+        val updated = listOf(newContext) + _savedContexts.value.filter { it.id != newContext.id }
+        _savedContexts.value = updated
+        settingsRepository.saveContexts(updated)
+        selectContext(newContext)
     }
 
     fun updateDelay(seconds: Int) {
-        _settings.value = _settings.value.copy(delaySeconds = seconds.coerceIn(1, 300))
+        val clamped = seconds.coerceIn(1, 600)
+        val updated = _settings.value.copy(delaySeconds = clamped)
+        _settings.value = updated
+        settingsRepository.saveSettings(updated)
     }
 
-    fun updateSettings(settings: CaptureSettings) {
-        _settings.value = settings
+    fun updateResolution(dimension: Int) {
+        val updated = _settings.value.copy(maxResolutionDimension = dimension)
+        _settings.value = updated
+        settingsRepository.saveSettings(updated)
+    }
+
+    fun updateSettings(newSettings: CaptureSettings) {
+        _settings.value = newSettings
+        settingsRepository.saveSettings(newSettings)
+    }
+
+    fun saveApiKey(apiKey: String) {
+        apiKeyStore.saveApiKey(apiKey)
+        _hasApiKey.value = apiKeyStore.hasApiKey()
+        _maskedApiKey.value = apiKeyStore.getMaskedApiKey()
+        _testResult.value = null
+    }
+
+    fun clearApiKey() {
+        apiKeyStore.clearApiKey()
+        _hasApiKey.value = false
+        _maskedApiKey.value = ""
+        _testResult.value = null
+    }
+
+    fun testConnection() {
+        if (_isTestingConnection.value) return
+        viewModelScope.launch {
+            _isTestingConnection.value = true
+            _testResult.value = null
+            val result = visionAnalyzer.testConnection()
+            _testResult.value = result
+            _isTestingConnection.value = false
+        }
+    }
+
+    fun clearTestResult() {
+        _testResult.value = null
     }
 
     fun onMediaProjectionApproved(resultCode: Int, data: Intent, appContext: Context) {
         viewModelScope.launch {
-            // 1. Start foreground service
             ScreenCaptureService.startService(appContext, resultCode, data)
-
-            // 2. Start monitoring loop in controller
             controller.startMonitoring(
                 contextProvider = { _currentContext.value },
                 settingsProvider = { _settings.value }
             )
-
-            // 3. Switch view to MonitorScreen so user immediately sees live activity
             _currentRoute.value = ScreenRoute.MONITOR
         }
     }

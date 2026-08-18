@@ -6,6 +6,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -31,12 +33,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.CaptureSettings
-import com.example.ui.theme.AmberAccent
 import com.example.ui.theme.NeonCyan
 import com.example.ui.theme.Slate700
 import com.example.ui.theme.Slate800
 import com.example.ui.theme.Slate900
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun DelaySelector(
     selectedDelaySeconds: Int,
@@ -89,7 +91,7 @@ fun DelaySelector(
                 modifier = Modifier.size(14.dp)
             )
             Text(
-                text = "Timer begins only after AI finishes processing the previous frame.",
+                text = "Timer strictly begins AFTER Gemini completes analyzing previous frame.",
                 fontSize = 11.sp,
                 color = NeonCyan
             )
@@ -98,15 +100,16 @@ fun DelaySelector(
         Spacer(modifier = Modifier.height(14.dp))
 
         // Preset Chips
-        Row(
+        FlowRow(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             CaptureSettings.DELAY_PRESETS.forEach { preset ->
                 val isSelected = selectedDelaySeconds == preset
+                val label = if (preset >= 60) "${preset / 60}m" else "${preset}s"
                 Box(
                     modifier = Modifier
-                        .weight(1f)
                         .testTag("delay_preset_${preset}s")
                         .clip(RoundedCornerShape(10.dp))
                         .background(if (isSelected) NeonCyan else Slate800)
@@ -116,12 +119,12 @@ fun DelaySelector(
                             RoundedCornerShape(10.dp)
                         )
                         .clickable { onDelaySelected(preset) }
-                        .padding(vertical = 10.dp),
+                        .padding(horizontal = 14.dp, vertical = 8.dp),
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
-                        text = "${preset}s",
-                        fontSize = 13.sp,
+                        text = label,
+                        fontSize = 12.sp,
                         fontWeight = if (isSelected) FontWeight.ExtraBold else FontWeight.Medium,
                         color = if (isSelected) Color(0xFF070B14) else MaterialTheme.colorScheme.onSurface
                     )
@@ -131,19 +134,26 @@ fun DelaySelector(
 
         Spacer(modifier = Modifier.height(14.dp))
 
-        // Slider for Custom Seconds
+        // Slider for Custom Seconds (1 to 600)
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                text = "Custom Duration",
+                text = "Custom Delay (1s – 600s)",
                 fontSize = 12.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+            val displayTime = if (selectedDelaySeconds >= 60) {
+                val mins = selectedDelaySeconds / 60
+                val secs = selectedDelaySeconds % 60
+                if (secs == 0) "$mins min" else "$mins min $secs sec"
+            } else {
+                "$selectedDelaySeconds seconds"
+            }
             Text(
-                text = "$selectedDelaySeconds seconds",
+                text = displayTime,
                 fontSize = 13.sp,
                 fontWeight = FontWeight.Bold,
                 color = NeonCyan
@@ -151,10 +161,9 @@ fun DelaySelector(
         }
 
         Slider(
-            value = selectedDelaySeconds.toFloat(),
-            onValueChange = { onDelaySelected(it.toInt()) },
-            valueRange = 1f..60f,
-            steps = 58,
+            value = selectedDelaySeconds.toFloat().coerceIn(1f, 600f),
+            onValueChange = { onDelaySelected(it.toInt().coerceIn(1, 600)) },
+            valueRange = 1f..600f,
             colors = SliderDefaults.colors(
                 thumbColor = NeonCyan,
                 activeTrackColor = NeonCyan,

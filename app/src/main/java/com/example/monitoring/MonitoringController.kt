@@ -17,6 +17,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 class MonitoringController(
     private val visionAnalyzer: VisionAnalyzer,
@@ -38,6 +40,7 @@ class MonitoringController(
     val lastCaptureTimestamp: StateFlow<Long?> = _lastCaptureTimestamp.asStateFlow()
 
     private var loopJob: Job? = null
+    private val loopMutex = Mutex()
 
     val isMonitoring: Boolean
         get() = when (_state.value) {
@@ -50,97 +53,94 @@ class MonitoringController(
 
     /**
      * Starts the sequential capture -> AI -> delay -> capture loop.
+     * Guaranteed that delay runs strictly AFTER the AI analysis finishes.
      */
     fun startMonitoring(
         contextProvider: () -> AnalysisContext,
         settingsProvider: () -> CaptureSettings
     ) {
-        if (isMonitoring) return
+        coroutineScope.launch {
+            loopMutex.withLock {
+                if (isMonitoring) return@withLock
 
-        loopJob?.cancel()
-        loopJob = coroutineScope.launch(Dispatchers.Default) {
-            try {
-                _state.value = MonitoringState.Starting
-                
-                // Wait briefly for ScreenCaptureEngine to be fully ready
-                var waitAttempts = 0
-                while (!ScreenCaptureEngine.isReady.value && waitAttempts < 20 && isActive) {
-                    delay(150)
-                    waitAttempts++
-                }
+                loopJob?.cancel()
+                loopJob = coroutineScope.launch(Dispatchers.Default) {
+                    try {
+                        _state.value = MonitoringState.Starting
 
-                if (!ScreenCaptureEngine.isReady.value) {
-                    _state.value = MonitoringState.Error("Screen capture session was not ready. Please try starting again.")
-                    return@launch
-                }
-
-                // Core Processing Loop
-                while (isActive) {
-                    // STEP 1: CAPTURE SCREEN
-                    _state.value = MonitoringState.Capturing
-                    val captureResult = ScreenCaptureEngine.captureSingleFrame()
-
-                    val capturedBitmap = when (captureResult) {
-                        is CaptureResult.Success -> {
-                            val previousBmp = _latestBitmap.value
-                            _latestBitmap.value = captureResult.bitmap
-                            // Eligible for garbage collection
-                            if (previousBmp != null && previousBmp != captureResult.bitmap && !previousBmp.isRecycled) {
-                                previousBmp.recycle()
-                            }
-                            _lastCaptureTimestamp.value = System.currentTimeMillis()
-                            captureResult.bitmap
+                        // Wait for ScreenCaptureEngine to be ready
+                        var waitAttempts = 0
+                        while (!ScreenCaptureEngine.isReady.value && waitAttempts < 25 && isActive) {
+                            delay(100)
+                            waitAttempts++
                         }
-                        is CaptureResult.Error -> {
-                            _state.value = MonitoringState.Error("Screen capture failed: ${captureResult.message}")
+
+                        if (!ScreenCaptureEngine.isReady.value) {
+                            _state.value = MonitoringState.Error("Screen capture session is not active. Please start monitoring again.")
                             return@launch
                         }
+
+                        // Continuous Sequential Loop
+                        while (isActive) {
+                            // 1. CAPTURE SCREEN
+                            _state.value = MonitoringState.Capturing
+                            val captureResult = ScreenCaptureEngine.captureSingleFrame()
+
+                            val capturedBitmap = when (captureResult) {
+                                is CaptureResult.Success -> {
+                                    _latestBitmap.value = captureResult.bitmap
+                                    _lastCaptureTimestamp.value = System.currentTimeMillis()
+                                    captureResult.bitmap
+                                }
+                                is CaptureResult.Error -> {
+                                    _state.value = MonitoringState.Error(captureResult.message)
+                                    return@launch
+                                }
+                            }
+
+                            // 2. SEND TO AI
+                            val currentContext = contextProvider()
+                            val currentSettings = settingsProvider()
+                            _state.value = MonitoringState.Analyzing(startTimeMs = System.currentTimeMillis())
+
+                            // 3. AI PROCESSING (Wait for complete response)
+                            val result = visionAnalyzer.analyze(
+                                bitmap = capturedBitmap,
+                                context = currentContext,
+                                settings = currentSettings
+                            )
+                            _latestResult.value = result
+                            _analysisCount.value += 1
+
+                            // 4. DELAY TIMER (Strictly starts AFTER AI completes)
+                            val delaySeconds = currentSettings.delaySeconds.coerceIn(1, 600)
+                            for (remaining in delaySeconds downTo 1) {
+                                if (!isActive) break
+                                _state.value = MonitoringState.Waiting(
+                                    remainingSeconds = remaining,
+                                    totalSeconds = delaySeconds
+                                )
+                                delay(1000L)
+                            }
+                        }
+                    } catch (e: CancellationException) {
+                        _state.value = MonitoringState.Idle
+                    } catch (e: Exception) {
+                        _state.value = MonitoringState.Error(e.localizedMessage ?: "Unexpected error during monitoring")
+                    } finally {
+                        if (_state.value !is MonitoringState.Idle && _state.value !is MonitoringState.Error) {
+                            _state.value = MonitoringState.Idle
+                        }
                     }
-
-                    // STEP 2: SEND IMAGE + CONTEXT TO AI
-                    val currentContext = contextProvider()
-                    _state.value = MonitoringState.Analyzing(startTimeMs = System.currentTimeMillis())
-
-                    // STEP 3: AI PROCESSING
-                    val result = visionAnalyzer.analyze(
-                        bitmap = capturedBitmap,
-                        context = currentContext
-                    )
-                    _latestResult.value = result
-                    _analysisCount.value += 1
-
-                    // STEP 4: START DELAY TIMER AFTER AI HAS FULLY FINISHED
-                    val currentSettings = settingsProvider()
-                    val delaySeconds = currentSettings.delaySeconds.coerceAtLeast(1)
-
-                    for (remaining in delaySeconds downTo 1) {
-                        if (!isActive) break
-                        _state.value = MonitoringState.Waiting(
-                            remainingSeconds = remaining,
-                            totalSeconds = delaySeconds
-                        )
-                        delay(1000L)
-                    }
-                }
-            } catch (e: CancellationException) {
-                // Normal cancellation when user presses Stop
-                _state.value = MonitoringState.Idle
-            } catch (e: Exception) {
-                _state.value = MonitoringState.Error(e.localizedMessage ?: "Unexpected monitoring error")
-            } finally {
-                if (_state.value is MonitoringState.Stopping || _state.value is MonitoringState.Capturing || _state.value is MonitoringState.Analyzing || _state.value is MonitoringState.Waiting) {
-                    _state.value = MonitoringState.Idle
                 }
             }
         }
     }
 
     /**
-     * Safely stops the monitoring loop, cancels active AI requests / delays,
-     * and returns to Idle state.
+     * Safely and idempotently stops the monitoring loop.
      */
     fun stopMonitoring() {
-        _state.value = MonitoringState.Stopping
         loopJob?.cancel()
         loopJob = null
         _state.value = MonitoringState.Idle
@@ -148,6 +148,8 @@ class MonitoringController(
 
     fun resetState() {
         stopMonitoring()
-        _state.value = MonitoringState.Idle
+        _latestResult.value = null
+        _analysisCount.value = 0
+        _lastCaptureTimestamp.value = null
     }
 }

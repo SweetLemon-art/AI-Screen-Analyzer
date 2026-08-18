@@ -11,23 +11,24 @@ object ImageProcessor {
     /**
      * Converts an android.media.Image from ImageReader (PixelFormat.RGBA_8888) to an Android Bitmap.
      * Accurately handles rowStride padding where rowStride != width * pixelStride.
-     * Note: Closes the provided [image] inside a use block to avoid leaks.
+     * Closes the provided [image] inside a use/finally block to prevent memory leaks.
      */
     fun convertImageToBitmap(image: Image): Bitmap? {
         return try {
             val planes = image.planes
+            if (planes.isEmpty()) return null
+
             val buffer = planes[0].buffer
             val pixelStride = planes[0].pixelStride
             val rowStride = planes[0].rowStride
             val rowPadding = rowStride - pixelStride * image.width
 
-            // Create temporary bitmap with padded width if necessary
             val bitmapWidth = image.width + rowPadding / pixelStride
             val bitmapHeight = image.height
+
             val tempBitmap = Bitmap.createBitmap(bitmapWidth, bitmapHeight, Bitmap.Config.ARGB_8888)
             tempBitmap.copyPixelsFromBuffer(buffer)
 
-            // Crop out padding if rowStride > width
             if (bitmapWidth != image.width) {
                 val cleanBitmap = Bitmap.createBitmap(tempBitmap, 0, 0, image.width, image.height)
                 tempBitmap.recycle()
@@ -36,20 +37,18 @@ object ImageProcessor {
                 tempBitmap
             }
         } catch (e: Exception) {
-            e.printStackTrace()
             null
         } finally {
             try {
                 image.close()
-            } catch (e: Exception) {
-                // Ignore already closed
+            } catch (ignored: Exception) {
             }
         }
     }
 
     /**
      * Scales down the bitmap if width or height exceeds [maxDimension], keeping exact aspect ratio.
-     * Then encodes to Base64 JPEG string for Gemini REST API.
+     * Compresses the bitmap with [quality] and encodes to Base64 JPEG string for Gemini REST API.
      */
     fun processForGemini(
         rawBitmap: Bitmap,
@@ -69,7 +68,8 @@ object ImageProcessor {
         }
 
         val outputStream = ByteArrayOutputStream()
-        scaledBitmap.compress(Bitmap.CompressFormat.JPEG, quality, outputStream)
+        val clampedQuality = quality.coerceIn(10, 100)
+        scaledBitmap.compress(Bitmap.CompressFormat.JPEG, clampedQuality, outputStream)
         val byteArray = outputStream.toByteArray()
         val base64String = Base64.encodeToString(byteArray, Base64.NO_WRAP)
 
