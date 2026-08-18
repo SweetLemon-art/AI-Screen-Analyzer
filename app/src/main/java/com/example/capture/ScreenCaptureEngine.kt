@@ -22,6 +22,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.coroutines.resume
 
 /**
@@ -30,11 +31,13 @@ import kotlin.coroutines.resume
  * INVARIANTS:
  * - Exactly ONE VirtualDisplay per MediaProjection session.
  * - [captureSingleFrame] NEVER creates or recreates VirtualDisplay.
- * - Uses real VirtualDisplay.Callback and MediaProjection.Callback for safe teardown.
+ * - Callbacks are explicitly bound to session generations to prevent stale callback pollution.
  * - [stop] is strictly idempotent and safe when called repeatedly.
  * - Synchronized with a Mutex so only one frame capture occurs at any instant.
  */
 object ScreenCaptureEngine {
+
+    private val sessionGeneration = AtomicLong(0)
 
     @Volatile
     private var mediaProjection: MediaProjection? = null
@@ -58,36 +61,6 @@ object ScreenCaptureEngine {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val captureMutex = Mutex()
 
-    private val projectionCallback = object : MediaProjection.Callback() {
-        override fun onStop() {
-            super.onStop()
-            _isReady.value = false
-            cleanupResources()
-            val callback = onProjectionStopCallback
-            onProjectionStopCallback = null
-            callback?.invoke()
-        }
-    }
-
-    private val virtualDisplayCallback = object : VirtualDisplay.Callback() {
-        override fun onStopped() {
-            super.onStopped()
-            _isReady.value = false
-            cleanupResources()
-            val callback = onProjectionStopCallback
-            onProjectionStopCallback = null
-            callback?.invoke()
-        }
-
-        override fun onPaused() {
-            super.onPaused()
-        }
-
-        override fun onResumed() {
-            super.onResumed()
-        }
-    }
-
     /**
      * Initializes the capture engine with the MediaProjection provided by ScreenCaptureService.
      * Sets up exactly ONE VirtualDisplay and ONE ImageReader for this session.
@@ -98,14 +71,32 @@ object ScreenCaptureEngine {
         projection: MediaProjection,
         onStopCallback: (() -> Unit)? = null
     ) {
-        // Clean up prior session if any
-        stop()
+        // Advance generation so any pending/delayed callbacks from previous sessions are discarded
+        val currentGen = sessionGeneration.incrementAndGet()
+        cleanupResourcesInternal()
 
         this.mediaProjection = projection
         this.onProjectionStopCallback = onStopCallback
 
+        val projCallback = object : MediaProjection.Callback() {
+            override fun onStop() {
+                super.onStop()
+                handleSessionStop(currentGen)
+            }
+        }
+
+        val vDisplayCallback = object : VirtualDisplay.Callback() {
+            override fun onStopped() {
+                super.onStopped()
+                handleSessionStop(currentGen)
+            }
+
+            override fun onPaused() {}
+            override fun onResumed() {}
+        }
+
         try {
-            projection.registerCallback(projectionCallback, mainHandler)
+            projection.registerCallback(projCallback, mainHandler)
         } catch (e: Exception) {
             stop()
             return
@@ -130,7 +121,7 @@ object ScreenCaptureEngine {
         if (screenWidth <= 0) screenWidth = 1080
         if (screenHeight <= 0) screenHeight = 1920
 
-        val success = setupSessionResources(projection)
+        val success = setupSessionResources(projection, vDisplayCallback)
         _isReady.value = success
         if (!success) {
             stop()
@@ -138,7 +129,10 @@ object ScreenCaptureEngine {
     }
 
     @Synchronized
-    private fun setupSessionResources(projection: MediaProjection): Boolean {
+    private fun setupSessionResources(
+        projection: MediaProjection,
+        vDisplayCallback: VirtualDisplay.Callback
+    ): Boolean {
         return try {
             val reader = ImageReader.newInstance(
                 screenWidth,
@@ -155,13 +149,27 @@ object ScreenCaptureEngine {
                 screenDensity,
                 DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
                 reader.surface,
-                virtualDisplayCallback,
+                vDisplayCallback,
                 mainHandler
             )
             this.virtualDisplay = vDisplay
             true
         } catch (e: Exception) {
             false
+        }
+    }
+
+    private fun handleSessionStop(callbackGen: Long) {
+        synchronized(this) {
+            // If callback is from an old session, IGNORE it and do NOT tear down the current session
+            if (callbackGen != sessionGeneration.get()) {
+                return
+            }
+            _isReady.value = false
+            cleanupResourcesInternal()
+            val callback = onProjectionStopCallback
+            onProjectionStopCallback = null
+            callback?.invoke()
         }
     }
 
@@ -244,7 +252,7 @@ object ScreenCaptureEngine {
     }
 
     @Synchronized
-    private fun cleanupResources() {
+    private fun cleanupResourcesInternal() {
         val reader = imageReader
         imageReader = null
         try {
@@ -261,7 +269,6 @@ object ScreenCaptureEngine {
         val projection = mediaProjection
         mediaProjection = null
         try {
-            projection?.unregisterCallback(projectionCallback)
             projection?.stop()
         } catch (ignored: Exception) {}
     }
@@ -272,8 +279,9 @@ object ScreenCaptureEngine {
      */
     @Synchronized
     fun stop() {
+        sessionGeneration.incrementAndGet()
         _isReady.value = false
-        cleanupResources()
+        cleanupResourcesInternal()
         onProjectionStopCallback = null
     }
 }

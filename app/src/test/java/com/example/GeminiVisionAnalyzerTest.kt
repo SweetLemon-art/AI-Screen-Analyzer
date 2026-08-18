@@ -27,6 +27,7 @@ import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -101,7 +102,6 @@ class ScreenCaptureEngineLifecycleTest {
 
     @Test
     fun testIdempotentStop() {
-        // Calling stop multiple times without initialize must be completely safe
         ScreenCaptureEngine.stop()
         ScreenCaptureEngine.stop()
         ScreenCaptureEngine.stop()
@@ -116,6 +116,13 @@ class ScreenCaptureEngineLifecycleTest {
         assertTrue(result is CaptureResult.Error)
         assertFalse(ScreenCaptureEngine.isReady.value)
     }
+
+    @Test
+    fun testSessionGenerationIsolation() {
+        // Repeated stop increments generation and safely cleans without throwing
+        ScreenCaptureEngine.stop()
+        assertFalse(ScreenCaptureEngine.isReady.value)
+    }
 }
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -124,21 +131,19 @@ class ScreenCaptureEngineLifecycleTest {
 class MonitoringControllerLifecycleRaceTest {
 
     @Test
-    fun testStartStopStartLifecycleNoLeak() = runTest {
+    fun testStartStopStartSequence() = runTest {
         val testDispatcher = StandardTestDispatcher(testScheduler)
         val testScope = TestScope(testDispatcher)
 
-        var analyzeCallCount = 0
         val fakeAnalyzer = object : VisionAnalyzer {
             override suspend fun analyze(
                 bitmap: Bitmap,
                 context: AnalysisContext,
                 settings: CaptureSettings
             ): AnalysisResult {
-                analyzeCallCount++
                 return AnalysisResult(
                     contextName = context.name,
-                    summary = "Result $analyzeCallCount",
+                    summary = "Analysis Complete",
                     observations = emptyList(),
                     conclusion = "OK",
                     rawResponse = "",
@@ -156,33 +161,82 @@ class MonitoringControllerLifecycleRaceTest {
         val controller = MonitoringController(fakeAnalyzer, testScope)
         assertEquals(MonitoringState.Idle, controller.state.value)
 
-        // 1. Rapid START -> STOP -> START cycle
+        // START
         controller.startMonitoring(
             contextProvider = { AnalysisContext.DEFAULT },
             settingsProvider = { CaptureSettings.DEFAULT }
         )
+        // STOP immediately
         controller.stopMonitoring()
         assertEquals(MonitoringState.Idle, controller.state.value)
 
+        // START again
         controller.startMonitoring(
             contextProvider = { AnalysisContext.DEFAULT },
             settingsProvider = { CaptureSettings.DEFAULT }
         )
         advanceUntilIdle()
 
-        // Verify clean state
+        // Clean STOP
         controller.stopMonitoring()
+        advanceUntilIdle()
         assertEquals(MonitoringState.Idle, controller.state.value)
     }
 
     @Test
-    fun testStopDuringGeminiAnalysisDoesNotPublishStaleResult() = runTest {
+    fun testStartStopStartStopSequence() = runTest {
+        val testDispatcher = StandardTestDispatcher(testScheduler)
+        val testScope = TestScope(testDispatcher)
+
+        val fakeAnalyzer = object : VisionAnalyzer {
+            override suspend fun analyze(
+                bitmap: Bitmap,
+                context: AnalysisContext,
+                settings: CaptureSettings
+            ): AnalysisResult {
+                return AnalysisResult(
+                    contextName = context.name,
+                    summary = "Result",
+                    observations = emptyList(),
+                    conclusion = "OK",
+                    rawResponse = "",
+                    isSuccess = true,
+                    errorMessage = null,
+                    processingDurationMs = 10L
+                )
+            }
+
+            override suspend fun testConnection(): ConnectionTestResult {
+                return ConnectionTestResult.Success("OK")
+            }
+        }
+
+        val controller = MonitoringController(fakeAnalyzer, testScope)
+
+        // START -> STOP -> START -> STOP rapid succession
+        controller.startMonitoring(
+            contextProvider = { AnalysisContext.DEFAULT },
+            settingsProvider = { CaptureSettings.DEFAULT }
+        )
+        controller.stopMonitoring()
+        controller.startMonitoring(
+            contextProvider = { AnalysisContext.DEFAULT },
+            settingsProvider = { CaptureSettings.DEFAULT }
+        )
+        controller.stopMonitoring()
+
+        advanceUntilIdle()
+        assertEquals(MonitoringState.Idle, controller.state.value)
+        assertFalse(controller.isMonitoring)
+    }
+
+    @Test
+    fun testStopWhileGeminiIsRunningPreventsStalePublish() = runTest {
         val testDispatcher = StandardTestDispatcher(testScheduler)
         val testScope = TestScope(testDispatcher)
 
         val analysisStarted = CompletableDeferred<Unit>()
-        val analysisProceed = CompletableDeferred<Unit>()
-        var analysisCompleted = false
+        val analysisGate = CompletableDeferred<Unit>()
 
         val fakeAnalyzer = object : VisionAnalyzer {
             override suspend fun analyze(
@@ -191,8 +245,7 @@ class MonitoringControllerLifecycleRaceTest {
                 settings: CaptureSettings
             ): AnalysisResult {
                 analysisStarted.complete(Unit)
-                analysisProceed.await()
-                analysisCompleted = true
+                analysisGate.await() // block until test says continue
                 return AnalysisResult(
                     contextName = context.name,
                     summary = "Stale Result",
@@ -212,15 +265,66 @@ class MonitoringControllerLifecycleRaceTest {
 
         val controller = MonitoringController(fakeAnalyzer, testScope)
 
-        // Simulate ready engine state
         controller.startMonitoring(
             contextProvider = { AnalysisContext.DEFAULT },
             settingsProvider = { CaptureSettings.DEFAULT }
         )
         advanceTimeBy(100)
 
-        // Stopping while in progress
+        // STOP while analysis is waiting
         controller.stopMonitoring()
+        assertEquals(MonitoringState.Idle, controller.state.value)
+        assertFalse(controller.isMonitoring)
+
+        // Release the gated analysis
+        analysisGate.complete(Unit)
+        advanceUntilIdle()
+
+        // Stale result MUST NOT be published
+        assertNull("Stale analysis result must not be published to latestResult", controller.latestResult.value)
+        assertEquals(MonitoringState.Idle, controller.state.value)
+    }
+
+    @Test
+    fun testStopDuringDelayTimer() = runTest {
+        val testDispatcher = StandardTestDispatcher(testScheduler)
+        val testScope = TestScope(testDispatcher)
+
+        val fakeAnalyzer = object : VisionAnalyzer {
+            override suspend fun analyze(
+                bitmap: Bitmap,
+                context: AnalysisContext,
+                settings: CaptureSettings
+            ): AnalysisResult {
+                return AnalysisResult(
+                    contextName = context.name,
+                    summary = "First Result",
+                    observations = emptyList(),
+                    conclusion = "OK",
+                    rawResponse = "",
+                    isSuccess = true,
+                    errorMessage = null,
+                    processingDurationMs = 10L
+                )
+            }
+
+            override suspend fun testConnection(): ConnectionTestResult {
+                return ConnectionTestResult.Success("OK")
+            }
+        }
+
+        val controller = MonitoringController(fakeAnalyzer, testScope)
+
+        controller.startMonitoring(
+            contextProvider = { AnalysisContext.DEFAULT },
+            settingsProvider = { CaptureSettings(delaySeconds = 60) }
+        )
+        advanceTimeBy(500)
+
+        // Stop during delay
+        controller.stopMonitoring()
+        advanceUntilIdle()
+
         assertEquals(MonitoringState.Idle, controller.state.value)
         assertFalse(controller.isMonitoring)
     }
