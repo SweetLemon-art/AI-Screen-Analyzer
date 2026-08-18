@@ -1,0 +1,6 @@
+{
+  "name": "AI Screen Analyzer",
+  "description": "Native Android screen analysis application using MediaProjection and Gemini Multimodal Vision API.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
