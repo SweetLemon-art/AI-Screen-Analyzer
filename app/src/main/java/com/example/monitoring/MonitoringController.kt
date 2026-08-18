@@ -19,6 +19,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import java.util.concurrent.atomic.AtomicLong
 
 class MonitoringController(
     private val visionAnalyzer: VisionAnalyzer,
@@ -40,6 +41,7 @@ class MonitoringController(
     val lastCaptureTimestamp: StateFlow<Long?> = _lastCaptureTimestamp.asStateFlow()
 
     private var loopJob: Job? = null
+    private val sessionCounter = AtomicLong(0)
     private val loopMutex = Mutex()
 
     val isMonitoring: Boolean
@@ -53,7 +55,9 @@ class MonitoringController(
 
     /**
      * Starts the sequential capture -> AI -> delay -> capture loop.
-     * Guaranteed that delay runs strictly AFTER the AI analysis finishes.
+     * Guaranteed that:
+     * - Stale jobs from prior sessions cannot publish results, bitmaps, or state.
+     * - Delay strictly runs AFTER the AI analysis finishes.
      */
     fun startMonitoring(
         contextProvider: () -> AnalysisContext,
@@ -61,30 +65,37 @@ class MonitoringController(
     ) {
         coroutineScope.launch {
             loopMutex.withLock {
-                if (isMonitoring) return@withLock
-
+                // Cancel existing job and advance session generation
+                val sessionId = sessionCounter.incrementAndGet()
                 loopJob?.cancel()
+
+                _state.value = MonitoringState.Starting
+
                 loopJob = coroutineScope.launch(Dispatchers.Default) {
                     try {
-                        _state.value = MonitoringState.Starting
-
                         // Wait for ScreenCaptureEngine to be ready
                         var waitAttempts = 0
                         while (!ScreenCaptureEngine.isReady.value && waitAttempts < 25 && isActive) {
+                            if (sessionId != sessionCounter.get()) return@launch
                             delay(100)
                             waitAttempts++
                         }
 
                         if (!ScreenCaptureEngine.isReady.value) {
-                            _state.value = MonitoringState.Error("Screen capture session is not active. Please start monitoring again.")
+                            if (sessionId == sessionCounter.get()) {
+                                _state.value = MonitoringState.Error("Screen capture session is not active. Please start monitoring again.")
+                            }
                             return@launch
                         }
 
                         // Continuous Sequential Loop
-                        while (isActive) {
+                        while (isActive && sessionId == sessionCounter.get()) {
                             // 1. CAPTURE SCREEN
+                            if (sessionId != sessionCounter.get()) return@launch
                             _state.value = MonitoringState.Capturing
+
                             val captureResult = ScreenCaptureEngine.captureSingleFrame()
+                            if (sessionId != sessionCounter.get()) return@launch
 
                             val capturedBitmap = when (captureResult) {
                                 is CaptureResult.Success -> {
@@ -93,12 +104,15 @@ class MonitoringController(
                                     captureResult.bitmap
                                 }
                                 is CaptureResult.Error -> {
-                                    _state.value = MonitoringState.Error(captureResult.message)
+                                    if (sessionId == sessionCounter.get()) {
+                                        _state.value = MonitoringState.Error(captureResult.message)
+                                    }
                                     return@launch
                                 }
                             }
 
                             // 2. SEND TO AI
+                            if (sessionId != sessionCounter.get()) return@launch
                             val currentContext = contextProvider()
                             val currentSettings = settingsProvider()
                             _state.value = MonitoringState.Analyzing(startTimeMs = System.currentTimeMillis())
@@ -109,13 +123,15 @@ class MonitoringController(
                                 context = currentContext,
                                 settings = currentSettings
                             )
+
+                            if (sessionId != sessionCounter.get() || !isActive) return@launch
                             _latestResult.value = result
                             _analysisCount.value += 1
 
                             // 4. DELAY TIMER (Strictly starts AFTER AI completes)
                             val delaySeconds = currentSettings.delaySeconds.coerceIn(1, 600)
                             for (remaining in delaySeconds downTo 1) {
-                                if (!isActive) break
+                                if (sessionId != sessionCounter.get() || !isActive) return@launch
                                 _state.value = MonitoringState.Waiting(
                                     remainingSeconds = remaining,
                                     totalSeconds = delaySeconds
@@ -124,11 +140,18 @@ class MonitoringController(
                             }
                         }
                     } catch (e: CancellationException) {
-                        _state.value = MonitoringState.Idle
+                        if (sessionId == sessionCounter.get()) {
+                            _state.value = MonitoringState.Idle
+                        }
                     } catch (e: Exception) {
-                        _state.value = MonitoringState.Error(e.localizedMessage ?: "Unexpected error during monitoring")
+                        if (sessionId == sessionCounter.get()) {
+                            _state.value = MonitoringState.Error(e.localizedMessage ?: "Unexpected error during monitoring")
+                        }
                     } finally {
-                        if (_state.value !is MonitoringState.Idle && _state.value !is MonitoringState.Error) {
+                        if (sessionId == sessionCounter.get() &&
+                            _state.value !is MonitoringState.Idle &&
+                            _state.value !is MonitoringState.Error
+                        ) {
                             _state.value = MonitoringState.Idle
                         }
                     }
@@ -141,6 +164,7 @@ class MonitoringController(
      * Safely and idempotently stops the monitoring loop.
      */
     fun stopMonitoring() {
+        sessionCounter.incrementAndGet()
         loopJob?.cancel()
         loopJob = null
         _state.value = MonitoringState.Idle

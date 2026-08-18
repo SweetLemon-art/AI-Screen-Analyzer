@@ -2,15 +2,12 @@ package com.example
 
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
-import com.example.ai.AnalysisResult
-import com.example.ai.GeminiVisionAnalyzer
 import com.example.data.AnalysisContext
 import com.example.data.CaptureSettings
 import com.example.data.SettingsRepository
 import com.example.security.GeminiApiKeyStore
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -97,14 +94,20 @@ class SettingsRepositoryTest {
 
     @Test
     fun testDelayClamping() {
-        val settingsMin = CaptureSettings(delaySeconds = 1, maxResolutionDimension = 1080, compressionQuality = 80)
-        val settingsMax = CaptureSettings(delaySeconds = 600, maxResolutionDimension = 1080, compressionQuality = 80)
+        val settingsMin = CaptureSettings.createSafe(delay = -5, resolution = 100, quality = 20)
+        val settingsMax = CaptureSettings.createSafe(delay = 1000, resolution = 4000, quality = 150)
 
         repository.saveSettings(settingsMin)
-        assertEquals(1, repository.loadSettings().delaySeconds)
+        val loadedMin = repository.loadSettings()
+        assertEquals(1, loadedMin.delaySeconds)
+        assertEquals(480, loadedMin.maxResolutionDimension)
+        assertEquals(40, loadedMin.compressionQuality)
 
         repository.saveSettings(settingsMax)
-        assertEquals(600, repository.loadSettings().delaySeconds)
+        val loadedMax = repository.loadSettings()
+        assertEquals(600, loadedMax.delaySeconds)
+        assertEquals(2160, loadedMax.maxResolutionDimension)
+        assertEquals(100, loadedMax.compressionQuality)
     }
 
     @Test

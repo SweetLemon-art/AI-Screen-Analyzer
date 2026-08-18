@@ -92,21 +92,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun updateDelay(seconds: Int) {
-        val clamped = seconds.coerceIn(1, 600)
-        val updated = _settings.value.copy(delaySeconds = clamped)
-        _settings.value = updated
-        settingsRepository.saveSettings(updated)
+        val safe = _settings.value.copy(delaySeconds = seconds.coerceIn(1, 600))
+        _settings.value = safe
+        settingsRepository.saveSettings(safe)
     }
 
     fun updateResolution(dimension: Int) {
-        val updated = _settings.value.copy(maxResolutionDimension = dimension)
-        _settings.value = updated
-        settingsRepository.saveSettings(updated)
+        val safe = _settings.value.copy(maxResolutionDimension = dimension.coerceIn(480, 2160))
+        _settings.value = safe
+        settingsRepository.saveSettings(safe)
     }
 
     fun updateSettings(newSettings: CaptureSettings) {
-        _settings.value = newSettings
-        settingsRepository.saveSettings(newSettings)
+        val safe = CaptureSettings.createSafe(
+            delay = newSettings.delaySeconds,
+            resolution = newSettings.maxResolutionDimension,
+            quality = newSettings.compressionQuality
+        )
+        _settings.value = safe
+        settingsRepository.saveSettings(safe)
     }
 
     fun saveApiKey(apiKey: String) {

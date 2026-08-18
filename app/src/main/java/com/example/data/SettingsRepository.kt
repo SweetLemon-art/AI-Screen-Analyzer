@@ -7,6 +7,7 @@ import org.json.JSONObject
 
 /**
  * Manages persistence for CaptureSettings and AnalysisContexts.
+ * Strictly guarantees all retrieved and stored values are clamped within safe ranges.
  */
 class SettingsRepository(context: Context) {
 
@@ -17,7 +18,7 @@ class SettingsRepository(context: Context) {
 
     fun loadSettings(): CaptureSettings {
         val delay = prefs.getInt(KEY_DELAY, CaptureSettings.DEFAULT.delaySeconds).coerceIn(1, 600)
-        val resolution = prefs.getInt(KEY_RESOLUTION, CaptureSettings.DEFAULT.maxResolutionDimension)
+        val resolution = prefs.getInt(KEY_RESOLUTION, CaptureSettings.DEFAULT.maxResolutionDimension).coerceIn(480, 2160)
         val quality = prefs.getInt(KEY_QUALITY, CaptureSettings.DEFAULT.compressionQuality).coerceIn(40, 100)
 
         return CaptureSettings(
@@ -28,10 +29,15 @@ class SettingsRepository(context: Context) {
     }
 
     fun saveSettings(settings: CaptureSettings) {
+        val safeSettings = CaptureSettings.createSafe(
+            delay = settings.delaySeconds,
+            resolution = settings.maxResolutionDimension,
+            quality = settings.compressionQuality
+        )
         prefs.edit()
-            .putInt(KEY_DELAY, settings.delaySeconds.coerceIn(1, 600))
-            .putInt(KEY_RESOLUTION, settings.maxResolutionDimension)
-            .putInt(KEY_QUALITY, settings.compressionQuality.coerceIn(40, 100))
+            .putInt(KEY_DELAY, safeSettings.delaySeconds)
+            .putInt(KEY_RESOLUTION, safeSettings.maxResolutionDimension)
+            .putInt(KEY_QUALITY, safeSettings.compressionQuality)
             .apply()
     }
 

@@ -11,7 +11,7 @@ object ImageProcessor {
     /**
      * Converts an android.media.Image from ImageReader (PixelFormat.RGBA_8888) to an Android Bitmap.
      * Accurately handles rowStride padding where rowStride != width * pixelStride.
-     * Closes the provided [image] inside a use/finally block to prevent memory leaks.
+     * Guaranteed to close the provided [image] inside a try/finally block to prevent memory leaks.
      */
     fun convertImageToBitmap(image: Image): Bitmap? {
         return try {
@@ -47,32 +47,45 @@ object ImageProcessor {
     }
 
     /**
-     * Scales down the bitmap if width or height exceeds [maxDimension], keeping exact aspect ratio.
-     * Compresses the bitmap with [quality] and encodes to Base64 JPEG string for Gemini REST API.
+     * Compresses and converts the given [rawBitmap] to a Base64-encoded JPEG string for Gemini Vision API.
+     * If scaling is necessary, a temporary scaled bitmap is created, encoded, and immediately recycled.
+     * Does NOT recycle the caller's [rawBitmap].
+     *
+     * @return Base64-encoded JPEG string
      */
-    fun processForGemini(
+    fun processForGeminiBase64(
         rawBitmap: Bitmap,
         maxDimension: Int = 1080,
         quality: Int = 80
-    ): Pair<Bitmap, String> {
+    ): String {
         val width = rawBitmap.width
         val height = rawBitmap.height
 
-        val scaledBitmap: Bitmap = if (width > maxDimension || height > maxDimension) {
+        val needsScale = width > maxDimension || height > maxDimension
+        val bitmapToCompress: Bitmap
+        val shouldRecycleScaled: Boolean
+
+        if (needsScale) {
             val scale = min(maxDimension.toFloat() / width, maxDimension.toFloat() / height)
             val targetWidth = (width * scale).toInt().coerceAtLeast(1)
             val targetHeight = (height * scale).toInt().coerceAtLeast(1)
-            Bitmap.createScaledBitmap(rawBitmap, targetWidth, targetHeight, true)
+            bitmapToCompress = Bitmap.createScaledBitmap(rawBitmap, targetWidth, targetHeight, true)
+            shouldRecycleScaled = (bitmapToCompress !== rawBitmap)
         } else {
-            rawBitmap
+            bitmapToCompress = rawBitmap
+            shouldRecycleScaled = false
         }
 
-        val outputStream = ByteArrayOutputStream()
-        val clampedQuality = quality.coerceIn(10, 100)
-        scaledBitmap.compress(Bitmap.CompressFormat.JPEG, clampedQuality, outputStream)
-        val byteArray = outputStream.toByteArray()
-        val base64String = Base64.encodeToString(byteArray, Base64.NO_WRAP)
-
-        return Pair(scaledBitmap, base64String)
+        return try {
+            val outputStream = ByteArrayOutputStream()
+            val clampedQuality = quality.coerceIn(40, 100)
+            bitmapToCompress.compress(Bitmap.CompressFormat.JPEG, clampedQuality, outputStream)
+            val byteArray = outputStream.toByteArray()
+            Base64.encodeToString(byteArray, Base64.NO_WRAP)
+        } finally {
+            if (shouldRecycleScaled && !bitmapToCompress.isRecycled) {
+                bitmapToCompress.recycle()
+            }
+        }
     }
 }

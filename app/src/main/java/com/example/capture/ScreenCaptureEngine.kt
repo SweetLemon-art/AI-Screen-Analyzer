@@ -22,15 +22,21 @@ import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.coroutines.resume
 
 /**
- * Singleton engine managing MediaProjection, VirtualDisplay, and ImageReader lifecycle.
- * Guarantees zero-queue, strictly single-shot frame capture.
+ * Engine managing MediaProjection, VirtualDisplay, and ImageReader lifecycle.
+ *
+ * INVARIANTS:
+ * - Exactly ONE VirtualDisplay per MediaProjection session.
+ * - [captureSingleFrame] NEVER recreates VirtualDisplay/ImageReader.
+ * - [stop] is strictly idempotent and safe when called repeatedly.
  */
 object ScreenCaptureEngine {
 
     @Volatile
     private var mediaProjection: MediaProjection? = null
+
     @Volatile
     private var virtualDisplay: VirtualDisplay? = null
+
     @Volatile
     private var imageReader: ImageReader? = null
 
@@ -59,6 +65,7 @@ object ScreenCaptureEngine {
 
     /**
      * Initializes the capture engine with the MediaProjection provided by ScreenCaptureService.
+     * Sets up exactly ONE VirtualDisplay and ONE ImageReader for this session.
      */
     @Synchronized
     fun initialize(
@@ -66,12 +73,18 @@ object ScreenCaptureEngine {
         projection: MediaProjection,
         onStopCallback: (() -> Unit)? = null
     ) {
-        // Cleanup prior session if any
+        // Clean up prior session if any
         stop()
 
         this.mediaProjection = projection
         this.onProjectionStopCallback = onStopCallback
-        projection.registerCallback(projectionCallback, mainHandler)
+
+        try {
+            projection.registerCallback(projectionCallback, mainHandler)
+        } catch (e: Exception) {
+            stop()
+            return
+        }
 
         // Determine screen dimensions & density
         val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
@@ -92,64 +105,56 @@ object ScreenCaptureEngine {
         if (screenWidth <= 0) screenWidth = 1080
         if (screenHeight <= 0) screenHeight = 1920
 
-        setupImageReaderAndVirtualDisplay()
-        _isReady.value = true
+        val success = setupSessionResources(projection)
+        _isReady.value = success
+        if (!success) {
+            stop()
+        }
     }
 
     @Synchronized
-    private fun setupImageReaderAndVirtualDisplay() {
-        val projection = mediaProjection ?: return
+    private fun setupSessionResources(projection: MediaProjection): Boolean {
+        return try {
+            val reader = ImageReader.newInstance(
+                screenWidth,
+                screenHeight,
+                PixelFormat.RGBA_8888,
+                2
+            )
+            this.imageReader = reader
 
-        try {
-            imageReader?.setOnImageAvailableListener(null, null)
-            imageReader?.close()
-        } catch (ignored: Exception) {}
-        imageReader = null
-
-        try {
-            virtualDisplay?.release()
-        } catch (ignored: Exception) {}
-        virtualDisplay = null
-
-        val reader = ImageReader.newInstance(
-            screenWidth,
-            screenHeight,
-            PixelFormat.RGBA_8888,
-            2
-        )
-        this.imageReader = reader
-
-        val vDisplay = projection.createVirtualDisplay(
-            "AIScreenCaptureDisplay",
-            screenWidth,
-            screenHeight,
-            screenDensity,
-            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-            reader.surface,
-            null,
-            mainHandler
-        )
-        this.virtualDisplay = vDisplay
+            val vDisplay = projection.createVirtualDisplay(
+                "AIScreenCaptureDisplay",
+                screenWidth,
+                screenHeight,
+                screenDensity,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                reader.surface,
+                null,
+                mainHandler
+            )
+            this.virtualDisplay = vDisplay
+            true
+        } catch (e: Exception) {
+            false
+        }
     }
 
     /**
-     * Captures exactly ONE frame from the screen.
-     * Guaranteed to close ImageReader images and produce a valid Bitmap or an error.
+     * Captures exactly ONE frame from the screen using the existing VirtualDisplay/ImageReader.
+     * NEVER recreates VirtualDisplay or ImageReader.
      */
     suspend fun captureSingleFrame(): CaptureResult = withContext(Dispatchers.Default) {
+        val reader = imageReader
         val projection = mediaProjection
-        if (projection == null || !_isReady.value) {
+        val vDisplay = virtualDisplay
+
+        if (reader == null || projection == null || vDisplay == null || !_isReady.value) {
             return@withContext CaptureResult.Error("Screen capture session is not active or permission was revoked.")
         }
 
-        var reader = imageReader
-        if (reader == null) {
-            setupImageReaderAndVirtualDisplay()
-            reader = imageReader ?: return@withContext CaptureResult.Error("Failed to initialize screen capture buffers.")
-        }
-
         try {
-            // Check if frame is immediately available
+            // Check if a frame is immediately available in the buffer
             val immediateImage = try {
                 reader.acquireLatestImage()
             } catch (e: Exception) {
@@ -161,11 +166,11 @@ object ScreenCaptureEngine {
                 return@withContext if (bitmap != null) {
                     CaptureResult.Success(bitmap)
                 } else {
-                    CaptureResult.Error("Failed to convert captured frame to Bitmap.")
+                    CaptureResult.Error("Failed to convert captured frame buffer to Bitmap.")
                 }
             }
 
-            // Otherwise, await the next frame with a 3-second timeout
+            // Await next frame with a 3-second timeout
             val capturedBitmap = withTimeoutOrNull(3000L) {
                 suspendCancellableCoroutine<Bitmap?> { cont ->
                     val listener = ImageReader.OnImageAvailableListener { r ->
@@ -207,27 +212,30 @@ object ScreenCaptureEngine {
 
     @Synchronized
     private fun cleanupResources() {
-        try {
-            imageReader?.setOnImageAvailableListener(null, null)
-            imageReader?.close()
-        } catch (ignored: Exception) {}
+        val reader = imageReader
         imageReader = null
-
         try {
-            virtualDisplay?.release()
+            reader?.setOnImageAvailableListener(null, null)
+            reader?.close()
         } catch (ignored: Exception) {}
+
+        val vDisplay = virtualDisplay
         virtualDisplay = null
-
         try {
-            mediaProjection?.unregisterCallback(projectionCallback)
-            mediaProjection?.stop()
+            vDisplay?.release()
         } catch (ignored: Exception) {}
+
+        val projection = mediaProjection
         mediaProjection = null
+        try {
+            projection?.unregisterCallback(projectionCallback)
+            projection?.stop()
+        } catch (ignored: Exception) {}
     }
 
     /**
      * Fully stops screen capture and releases all VirtualDisplay, ImageReader, and MediaProjection instances.
-     * Safe to call multiple times (idempotent).
+     * Strictly idempotent: safe to call multiple times in succession.
      */
     @Synchronized
     fun stop() {

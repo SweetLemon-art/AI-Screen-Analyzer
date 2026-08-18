@@ -5,6 +5,7 @@ import com.example.data.AnalysisContext
 import com.example.data.CaptureSettings
 import com.example.image.ImageProcessor
 import com.example.security.GeminiApiKeyStore
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -51,10 +52,10 @@ class GeminiVisionAnalyzer(
                 contextName = context.name,
                 summary = "API Key not configured",
                 observations = listOf(
-                    "No Gemini API key is currently saved on this device.",
+                    "No Gemini API key is currently configured.",
                     "Please navigate to Settings and enter your Gemini API key."
                 ),
-                conclusion = "Enter your API key in Settings to begin live analysis.",
+                conclusion = "Enter your Gemini API key in Settings to enable live analysis.",
                 rawResponse = "",
                 isSuccess = false,
                 errorMessage = "API key missing. Configure your Gemini API key in Settings.",
@@ -63,8 +64,8 @@ class GeminiVisionAnalyzer(
         }
 
         try {
-            // Process and scale bitmap according to user's CaptureSettings
-            val (_, base64Image) = ImageProcessor.processForGemini(
+            // Process and encode image to Base64 (temporary scaled bitmaps are recycled inside processForGeminiBase64)
+            val base64Image = ImageProcessor.processForGeminiBase64(
                 rawBitmap = bitmap,
                 maxDimension = settings.maxResolutionDimension,
                 quality = settings.compressionQuality
@@ -144,15 +145,18 @@ class GeminiVisionAnalyzer(
                 .post(requestBody)
                 .build()
 
-            val response = executeCancellationAwareCall(request)
-            val duration = System.currentTimeMillis() - startTime
-            val responseBodyString = response.body?.string().orEmpty()
+            // Execute network call with guaranteed Response.use { ... } cleanup
+            val (statusCode, responseBodyString, isSuccess) = executeCancellationAwareCall(request).use { response ->
+                Triple(response.code, response.body?.string().orEmpty(), response.isSuccessful)
+            }
 
-            if (!response.isSuccessful) {
-                val userErrorMessage = sanitizeHttpError(response.code, responseBodyString)
+            val duration = System.currentTimeMillis() - startTime
+
+            if (!isSuccess) {
+                val userErrorMessage = sanitizeHttpError(statusCode, responseBodyString)
                 return@withContext AnalysisResult(
                     contextName = context.name,
-                    summary = "Analysis request failed (${response.code})",
+                    summary = "Analysis request failed ($statusCode)",
                     observations = listOf(userErrorMessage),
                     conclusion = "Check your API key and network connectivity.",
                     rawResponse = "",
@@ -175,13 +179,15 @@ class GeminiVisionAnalyzer(
                 errorMessage = null,
                 processingDurationMs = duration
             )
+        } catch (e: CancellationException) {
+            // MUST propagate cancellation so the coroutine tree aborts promptly
+            throw e
         } catch (e: Exception) {
             val duration = System.currentTimeMillis() - startTime
             val safeMessage = when (e) {
                 is java.net.UnknownHostException -> "No internet connection. Please verify your network."
                 is java.net.SocketTimeoutException -> "Request timed out while waiting for Gemini response."
-                is kotlinx.coroutines.CancellationException -> "Analysis cancelled."
-                else -> "Network communication error. Please try again."
+                else -> "Network communication error: ${e.localizedMessage ?: "Please try again."}"
             }
             AnalysisResult(
                 contextName = context.name,
@@ -225,20 +231,23 @@ class GeminiVisionAnalyzer(
                 .post(requestBody)
                 .build()
 
-            val response = executeCancellationAwareCall(request)
-            val body = response.body?.string().orEmpty()
+            val (statusCode, responseBodyString, isSuccess) = executeCancellationAwareCall(request).use { response ->
+                Triple(response.code, response.body?.string().orEmpty(), response.isSuccessful)
+            }
 
-            if (response.isSuccessful) {
+            if (isSuccess) {
                 ConnectionTestResult.Success("Connection successful! Gemini API is active and authorized.")
             } else {
-                val safeError = sanitizeHttpError(response.code, body)
+                val safeError = sanitizeHttpError(statusCode, responseBodyString)
                 ConnectionTestResult.Error("API validation failed: $safeError")
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             val safeError = when (e) {
                 is java.net.UnknownHostException -> "Network error: Unable to resolve Gemini server. Check your internet connection."
                 is java.net.SocketTimeoutException -> "Network timeout while reaching Gemini server."
-                else -> "Connection test failed. Check network connection."
+                else -> "Connection test failed: ${e.localizedMessage ?: "Check network connection."}"
             }
             ConnectionTestResult.Error(safeError)
         }
@@ -272,11 +281,12 @@ class GeminiVisionAnalyzer(
         }
 
         return when (statusCode) {
-            400 -> "Invalid request format: ${serverMessage ?: "Bad request"}"
+            400 -> "Invalid request parameters: ${serverMessage ?: "Bad request"}"
             401, 403 -> "Invalid or unauthorized API key. Please check your Gemini API key in Settings."
             404 -> "Gemini model endpoint not found."
+            408 -> "Request timeout from server. Please try again."
             429 -> "Rate limit or quota exceeded. Please increase the delay in Settings or check your API quota."
-            500, 503, 504 -> "Gemini service temporarily unavailable. Please try again later."
+            500, 502, 503, 504 -> "Gemini service temporarily unavailable. Please try again later."
             else -> "HTTP $statusCode: ${serverMessage ?: "Unexpected API error"}"
         }
     }
@@ -311,7 +321,6 @@ class GeminiVisionAnalyzer(
 
         // Try direct JSON object parsing
         try {
-            // Strip markdown backticks if present (e.g. ```json ... ```)
             val cleanJson = rawContent.trim()
                 .removePrefix("```json")
                 .removePrefix("```JSON")
@@ -342,13 +351,10 @@ class GeminiVisionAnalyzer(
 
         // Fallback text parser
         val lines = rawContent.lines().map { it.trim() }.filter { it.isNotEmpty() }
-        var summary = ""
-        val observations = mutableListOf<String>()
-        var conclusion = ""
-        var currentSection = ""
-
         val summaryBuffer = StringBuilder()
+        val observations = mutableListOf<String>()
         val conclusionBuffer = StringBuilder()
+        var currentSection = ""
 
         for (line in lines) {
             val upper = line.uppercase()
@@ -386,12 +392,10 @@ class GeminiVisionAnalyzer(
             }
         }
 
-        summary = summaryBuffer.toString().trim()
-        conclusion = conclusionBuffer.toString().trim()
-
-        if (summary.isEmpty()) {
-            summary = rawContent.take(200) + if (rawContent.length > 200) "..." else ""
+        val summary = summaryBuffer.toString().trim().ifEmpty {
+            rawContent.take(200) + if (rawContent.length > 200) "..." else ""
         }
+        val conclusion = conclusionBuffer.toString().trim()
 
         return Triple(summary, observations, conclusion)
     }
