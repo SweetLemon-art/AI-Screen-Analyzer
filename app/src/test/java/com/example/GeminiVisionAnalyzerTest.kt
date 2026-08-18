@@ -22,7 +22,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
@@ -38,6 +37,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import java.util.concurrent.atomic.AtomicInteger
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
@@ -147,7 +147,7 @@ class MonitoringControllerLifecycleRaceTest {
     }
 
     @Test
-    fun startStopLeavesIdle() = runTest {
+    fun startThenStopEndsIdle() = runTest {
         val testDispatcher = StandardTestDispatcher(testScheduler)
         val testScope = TestScope(testDispatcher)
 
@@ -178,7 +178,7 @@ class MonitoringControllerLifecycleRaceTest {
     }
 
     @Test
-    fun startStopStartCreatesOnlyOneActiveLoop() = runTest {
+    fun startStopStartLeavesExactlyOneMonitoringJob() = runTest {
         val testDispatcher = StandardTestDispatcher(testScheduler)
         val testScope = TestScope(testDispatcher)
 
@@ -215,7 +215,7 @@ class MonitoringControllerLifecycleRaceTest {
     }
 
     @Test
-    fun startStopStartStopLeavesNoActiveLoop() = runTest {
+    fun startStopStartStopEndsIdle() = runTest {
         val testDispatcher = StandardTestDispatcher(testScheduler)
         val testScope = TestScope(testDispatcher)
 
@@ -248,7 +248,48 @@ class MonitoringControllerLifecycleRaceTest {
     }
 
     @Test
-    fun stopDuringCapture() = runTest {
+    fun rapidStartStopStartStopStart() = runTest {
+        val testDispatcher = StandardTestDispatcher(testScheduler)
+        val testScope = TestScope(testDispatcher)
+
+        var analysisCallCount = 0
+        val fakeAnalyzer = object : VisionAnalyzer {
+            override suspend fun analyze(bitmap: Bitmap, context: AnalysisContext, settings: CaptureSettings): AnalysisResult {
+                analysisCallCount++
+                return AnalysisResult(
+                    contextName = context.name,
+                    summary = "Analysis $analysisCallCount",
+                    observations = emptyList(),
+                    conclusion = "OK",
+                    rawResponse = "",
+                    isSuccess = true,
+                    errorMessage = null,
+                    processingDurationMs = 10L
+                )
+            }
+            override suspend fun testConnection(): ConnectionTestResult = ConnectionTestResult.Success("OK")
+        }
+
+        val controller = MonitoringController(fakeAnalyzer, testScope, FakeCaptureProvider())
+
+        // START -> STOP -> START -> STOP -> START in rapid bursts
+        controller.startMonitoring({ AnalysisContext.DEFAULT }, { CaptureSettings.DEFAULT })
+        controller.stopMonitoring()
+        controller.startMonitoring({ AnalysisContext.DEFAULT }, { CaptureSettings.DEFAULT })
+        controller.stopMonitoring()
+        controller.startMonitoring({ AnalysisContext.DEFAULT }, { CaptureSettings.DEFAULT })
+
+        advanceTimeBy(100)
+        assertTrue(controller.isMonitoring)
+
+        controller.stopMonitoring()
+        advanceUntilIdle()
+        assertEquals(MonitoringState.Idle, controller.state.value)
+        assertFalse(controller.isMonitoring)
+    }
+
+    @Test
+    fun stopDuringCaptureCancelsOldSession() = runTest {
         val testDispatcher = StandardTestDispatcher(testScheduler)
         val testScope = TestScope(testDispatcher)
 
@@ -293,7 +334,7 @@ class MonitoringControllerLifecycleRaceTest {
         controller.stopMonitoring()
         assertEquals(MonitoringState.Idle, controller.state.value)
 
-        // Let the blocked capture complete
+        // Release blocked capture
         captureGate.complete(Unit)
         advanceUntilIdle()
 
@@ -302,7 +343,7 @@ class MonitoringControllerLifecycleRaceTest {
     }
 
     @Test
-    fun stopDuringGemini() = runTest {
+    fun stopDuringGeminiCancelsOldSession() = runTest {
         val testDispatcher = StandardTestDispatcher(testScheduler)
         val testScope = TestScope(testDispatcher)
 
@@ -345,7 +386,7 @@ class MonitoringControllerLifecycleRaceTest {
     }
 
     @Test
-    fun stopDuringLongDelay() = runTest {
+    fun stopDuringLongDelayDoesNotWaitForDelay() = runTest {
         val testDispatcher = StandardTestDispatcher(testScheduler)
         val testScope = TestScope(testDispatcher)
 
@@ -380,7 +421,7 @@ class MonitoringControllerLifecycleRaceTest {
     }
 
     @Test
-    fun obsoleteSessionCannotPublishResult() = runTest {
+    fun staleSessionCannotPublishResult() = runTest {
         val testDispatcher = StandardTestDispatcher(testScheduler)
         val testScope = TestScope(testDispatcher)
 
@@ -421,7 +462,7 @@ class MonitoringControllerLifecycleRaceTest {
         geminiGate.complete(Unit)
         advanceTimeBy(200)
 
-        // Only session 2 should be published
+        // Clean stop
         controller.stopMonitoring()
         advanceUntilIdle()
 
@@ -429,7 +470,7 @@ class MonitoringControllerLifecycleRaceTest {
     }
 
     @Test
-    fun obsoleteSessionCannotPublishState() = runTest {
+    fun staleSessionCannotPublishState() = runTest {
         val testDispatcher = StandardTestDispatcher(testScheduler)
         val testScope = TestScope(testDispatcher)
 
@@ -455,7 +496,58 @@ class MonitoringControllerLifecycleRaceTest {
         controller.stopMonitoring()
 
         advanceUntilIdle()
-        // Obsolete session must not leave state in Capturing, Analyzing, or Waiting
+        // Stale session must not leave state in Capturing, Analyzing, or Waiting
+        assertEquals(MonitoringState.Idle, controller.state.value)
+    }
+
+    @Test
+    fun noOverlappingMonitoringLoops() = runTest {
+        val testDispatcher = StandardTestDispatcher(testScheduler)
+        val testScope = TestScope(testDispatcher)
+
+        val concurrentLoops = AtomicInteger(0)
+        var maxConcurrentLoops = 0
+
+        val fakeAnalyzer = object : VisionAnalyzer {
+            override suspend fun analyze(bitmap: Bitmap, context: AnalysisContext, settings: CaptureSettings): AnalysisResult {
+                val current = concurrentLoops.incrementAndGet()
+                if (current > maxConcurrentLoops) maxConcurrentLoops = current
+                try {
+                    delay(50)
+                } finally {
+                    concurrentLoops.decrementAndGet()
+                }
+                return AnalysisResult(
+                    contextName = context.name,
+                    summary = "Summary",
+                    observations = emptyList(),
+                    conclusion = "OK",
+                    rawResponse = "",
+                    isSuccess = true,
+                    errorMessage = null,
+                    processingDurationMs = 10L
+                )
+            }
+            override suspend fun testConnection(): ConnectionTestResult = ConnectionTestResult.Success("OK")
+        }
+
+        val controller = MonitoringController(fakeAnalyzer, testScope, FakeCaptureProvider())
+
+        // Multiple starts and stops
+        for (i in 1..5) {
+            controller.startMonitoring({ AnalysisContext.DEFAULT }, { CaptureSettings(delaySeconds = 1) })
+            advanceTimeBy(30)
+            controller.stopMonitoring()
+            advanceTimeBy(30)
+        }
+
+        controller.startMonitoring({ AnalysisContext.DEFAULT }, { CaptureSettings(delaySeconds = 1) })
+        advanceTimeBy(100)
+        controller.stopMonitoring()
+        advanceUntilIdle()
+
+        assertEquals("There must never be more than 1 concurrent monitoring loop", 1, maxConcurrentLoops)
+        assertEquals(0, concurrentLoops.get())
         assertEquals(MonitoringState.Idle, controller.state.value)
     }
 

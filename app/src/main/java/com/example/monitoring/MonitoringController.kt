@@ -11,16 +11,34 @@ import com.example.data.CaptureSettings
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import java.util.concurrent.atomic.AtomicLong
 
+/**
+ * Commands handled sequentially by the single lifecycle coordinator.
+ */
+private sealed interface LifecycleCommand {
+    data class Start(
+        val contextProvider: () -> AnalysisContext,
+        val settingsProvider: () -> CaptureSettings
+    ) : LifecycleCommand
+
+    data object Stop : LifecycleCommand
+}
+
+/**
+ * Single lifecycle coordinator managing start/stop serialization and monitoring execution.
+ *
+ * Architecture:
+ * UI/API -> single lifecycle command stream (Channel) -> sequential execution -> exactly ONE active monitoring Job.
+ */
 class MonitoringController(
     private val visionAnalyzer: VisionAnalyzer,
     private val coroutineScope: CoroutineScope,
@@ -43,7 +61,7 @@ class MonitoringController(
 
     private var activeJob: Job? = null
     private val sessionCounter = AtomicLong(0)
-    private val lifecycleMutex = Mutex()
+    private val commandChannel = Channel<LifecycleCommand>(Channel.UNLIMITED)
 
     val isMonitoring: Boolean
         get() = when (_state.value) {
@@ -54,88 +72,93 @@ class MonitoringController(
             else -> false
         }
 
+    init {
+        // Dedicated Single Lifecycle Coordinator
+        coroutineScope.launch {
+            for (command in commandChannel) {
+                try {
+                    handleLifecycleCommand(command)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    // Coordinator survives exceptions and remains ready for subsequent commands
+                }
+            }
+        }
+    }
+
+    private suspend fun handleLifecycleCommand(command: LifecycleCommand) {
+        when (command) {
+            is LifecycleCommand.Start -> {
+                // 1. Invalidate previous session
+                val newSessionId = sessionCounter.incrementAndGet()
+
+                // 2. Stop/cancel any existing monitoring Job & await completion
+                activeJob?.cancel()
+                try {
+                    activeJob?.join()
+                } catch (ignored: Exception) {}
+                activeJob = null
+
+                // 3. Verify that this start session is still the latest (no intervening STOP)
+                if (newSessionId != sessionCounter.get()) {
+                    return
+                }
+
+                // 4. Update state to starting
+                _state.value = MonitoringState.Starting
+
+                // 5. Create exactly ONE monitoring Job
+                val job = coroutineScope.launch {
+                    runMonitoringLoop(newSessionId, command.contextProvider, command.settingsProvider)
+                }
+                activeJob = job
+            }
+
+            is LifecycleCommand.Stop -> {
+                // 1. Invalidate session immediately
+                sessionCounter.incrementAndGet()
+
+                // 2. Set Idle immediately
+                _state.value = MonitoringState.Idle
+
+                // 3. Cancel active monitoring Job & await completion
+                activeJob?.cancel()
+                try {
+                    activeJob?.join()
+                } catch (ignored: Exception) {}
+                activeJob = null
+
+                // 4. Ensure Idle state is published
+                _state.value = MonitoringState.Idle
+            }
+        }
+    }
+
     /**
-     * Starts the sequential capture -> AI -> delay -> capture loop.
-     * Guaranteed that:
-     * - Shared lifecycle mutex protects only references/state during transitions.
-     * - lifecycleMutex is NEVER held during monitoring loop or while waiting for activeJob.join().
-     * - Old jobs are cancelled and joined BEFORE a new session loop begins.
-     * - Obsolete / cancelled sessions cannot publish state, results, bitmaps, or errors.
-     * - Delay strictly runs AFTER the AI analysis finishes.
+     * Enqueues START to the single lifecycle coordinator.
      */
     fun startMonitoring(
         contextProvider: () -> AnalysisContext,
         settingsProvider: () -> CaptureSettings
     ) {
-        val targetSession = sessionCounter.incrementAndGet()
         _state.value = MonitoringState.Starting
-        coroutineScope.launch {
-            // STEP 1: Acquire mutex to check session and grab old job
-            val jobToCancel: Job? = lifecycleMutex.withLock {
-                if (targetSession != sessionCounter.get()) {
-                    return@launch
-                }
-                val prev = activeJob
-                activeJob = null
-                prev
-            }
-
-            // STEP 2: Cancel and join old job WITHOUT holding lifecycleMutex
-            if (jobToCancel != null) {
-                jobToCancel.cancel()
-                try {
-                    jobToCancel.join()
-                } catch (ignored: Exception) {}
-            }
-
-            // STEP 3: Reacquire mutex, verify session is still current, create and store new job
-            lifecycleMutex.withLock {
-                if (targetSession != sessionCounter.get()) {
-                    return@launch
-                }
-
-                _state.value = MonitoringState.Starting
-
-                val newJob = coroutineScope.launch {
-                    runMonitoringLoop(targetSession, contextProvider, settingsProvider)
-                }
-                activeJob = newJob
-            }
-        }
+        commandChannel.trySend(LifecycleCommand.Start(contextProvider, settingsProvider))
     }
 
     /**
-     * Safely and idempotently stops the monitoring loop.
-     * Guaranteed to invalidate pending starts, cancel and join the active job without holding lifecycleMutex.
+     * Enqueues STOP to the single lifecycle coordinator.
      */
     fun stopMonitoring() {
-        val targetSession = sessionCounter.incrementAndGet()
         _state.value = MonitoringState.Idle
-        coroutineScope.launch {
-            // STEP 1: Atomically grab old job and clear activeJob under mutex
-            val jobToCancel: Job? = lifecycleMutex.withLock {
-                val prev = activeJob
-                activeJob = null
-                prev
-            }
-
-            // STEP 2: Cancel and join old job WITHOUT holding lifecycleMutex
-            if (jobToCancel != null) {
-                jobToCancel.cancel()
-                try {
-                    jobToCancel.join()
-                } catch (ignored: Exception) {}
-            }
-
-            // STEP 3: Verify and ensure Idle state
-            lifecycleMutex.withLock {
-                if (targetSession == sessionCounter.get()) {
-                    _state.value = MonitoringState.Idle
-                }
-            }
-        }
+        commandChannel.trySend(LifecycleCommand.Stop)
     }
 
+    /**
+     * Sequential execution of Capture -> AI -> Delay.
+     * Uses [currentCoroutineContext().isActive] for coroutine-local cancellation state.
+     * Verifies [sessionId == sessionCounter.get()] before every action and state emission.
+     */
     private suspend fun runMonitoringLoop(
         sessionId: Long,
         contextProvider: () -> AnalysisContext,
@@ -144,7 +167,7 @@ class MonitoringController(
         try {
             // Wait for capture provider to become ready
             var waitAttempts = 0
-            while (!captureProvider.isReady.value && waitAttempts < 25 && coroutineScope.isActive) {
+            while (!captureProvider.isReady.value && waitAttempts < 25 && currentCoroutineContext().isActive) {
                 if (sessionId != sessionCounter.get()) return
                 delay(100)
                 waitAttempts++
@@ -157,13 +180,13 @@ class MonitoringController(
                 return
             }
 
-            while (coroutineScope.isActive && sessionId == sessionCounter.get()) {
+            while (currentCoroutineContext().isActive && sessionId == sessionCounter.get()) {
                 // 1. CAPTURE SCREEN
-                if (sessionId != sessionCounter.get()) return
+                if (sessionId != sessionCounter.get() || !currentCoroutineContext().isActive) return
                 _state.value = MonitoringState.Capturing
 
                 val captureResult = captureProvider.captureSingleFrame()
-                if (sessionId != sessionCounter.get()) return
+                if (sessionId != sessionCounter.get() || !currentCoroutineContext().isActive) return
 
                 val capturedBitmap = when (captureResult) {
                     is CaptureResult.Success -> {
@@ -180,7 +203,7 @@ class MonitoringController(
                 }
 
                 // 2. PREPARE CONTEXT & SETTINGS
-                if (sessionId != sessionCounter.get()) return
+                if (sessionId != sessionCounter.get() || !currentCoroutineContext().isActive) return
                 val currentContext = contextProvider()
                 val currentSettings = settingsProvider()
                 _state.value = MonitoringState.Analyzing(startTimeMs = System.currentTimeMillis())
@@ -192,14 +215,14 @@ class MonitoringController(
                     settings = currentSettings
                 )
 
-                if (sessionId != sessionCounter.get()) return
+                if (sessionId != sessionCounter.get() || !currentCoroutineContext().isActive) return
                 _latestResult.value = result
                 _analysisCount.value += 1
 
                 // 4. DELAY TIMER (Strictly starts AFTER AI completes)
                 val delaySeconds = currentSettings.delaySeconds.coerceIn(1, 600)
                 for (remaining in delaySeconds downTo 1) {
-                    if (sessionId != sessionCounter.get()) return
+                    if (sessionId != sessionCounter.get() || !currentCoroutineContext().isActive) return
                     _state.value = MonitoringState.Waiting(
                         remainingSeconds = remaining,
                         totalSeconds = delaySeconds
