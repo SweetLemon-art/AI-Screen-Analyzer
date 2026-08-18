@@ -32,15 +32,19 @@ import kotlin.coroutines.resume
  * - Exactly ONE VirtualDisplay per MediaProjection session.
  * - [captureSingleFrame] NEVER creates or recreates VirtualDisplay.
  * - Callbacks are explicitly bound to session generations to prevent stale callback pollution.
+ * - Callbacks are unregistered before MediaProjection is stopped.
  * - [stop] is strictly idempotent and safe when called repeatedly.
  * - Synchronized with a Mutex so only one frame capture occurs at any instant.
  */
-object ScreenCaptureEngine {
+object ScreenCaptureEngine : ScreenCaptureProvider {
 
     private val sessionGeneration = AtomicLong(0)
 
     @Volatile
     private var mediaProjection: MediaProjection? = null
+
+    @Volatile
+    private var registeredProjCallback: MediaProjection.Callback? = null
 
     @Volatile
     private var virtualDisplay: VirtualDisplay? = null
@@ -53,7 +57,7 @@ object ScreenCaptureEngine {
     private var screenDensity = DisplayMetrics.DENSITY_DEFAULT
 
     private val _isReady = MutableStateFlow(false)
-    val isReady: StateFlow<Boolean> = _isReady.asStateFlow()
+    override val isReady: StateFlow<Boolean> = _isReady.asStateFlow()
 
     @Volatile
     private var onProjectionStopCallback: (() -> Unit)? = null
@@ -84,6 +88,7 @@ object ScreenCaptureEngine {
                 handleSessionStop(currentGen)
             }
         }
+        this.registeredProjCallback = projCallback
 
         val vDisplayCallback = object : VirtualDisplay.Callback() {
             override fun onStopped() {
@@ -178,7 +183,7 @@ object ScreenCaptureEngine {
      * NEVER creates or recreates VirtualDisplay or ImageReader.
      * Guaranteed single execution via [captureMutex].
      */
-    suspend fun captureSingleFrame(): CaptureResult = withContext(Dispatchers.Default) {
+    override suspend fun captureSingleFrame(): CaptureResult = withContext(Dispatchers.Default) {
         captureMutex.withLock {
             val reader = imageReader
             val projection = mediaProjection
@@ -266,9 +271,14 @@ object ScreenCaptureEngine {
             vDisplay?.release()
         } catch (ignored: Exception) {}
 
+        val callback = registeredProjCallback
+        registeredProjCallback = null
         val projection = mediaProjection
         mediaProjection = null
         try {
+            if (callback != null) {
+                projection?.unregisterCallback(callback)
+            }
             projection?.stop()
         } catch (ignored: Exception) {}
     }

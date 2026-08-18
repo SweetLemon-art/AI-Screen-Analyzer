@@ -9,6 +9,7 @@ import com.example.ai.GeminiVisionAnalyzer
 import com.example.ai.VisionAnalyzer
 import com.example.capture.CaptureResult
 import com.example.capture.ScreenCaptureEngine
+import com.example.capture.ScreenCaptureProvider
 import com.example.data.AnalysisContext
 import com.example.data.CaptureSettings
 import com.example.image.ImageProcessor
@@ -18,6 +19,9 @@ import com.example.security.GeminiApiKeyStore
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
@@ -119,7 +123,6 @@ class ScreenCaptureEngineLifecycleTest {
 
     @Test
     fun testSessionGenerationIsolation() {
-        // Repeated stop increments generation and safely cleans without throwing
         ScreenCaptureEngine.stop()
         assertFalse(ScreenCaptureEngine.isReady.value)
     }
@@ -130,73 +133,29 @@ class ScreenCaptureEngineLifecycleTest {
 @Config(sdk = [34])
 class MonitoringControllerLifecycleRaceTest {
 
-    @Test
-    fun testStartStopStartSequence() = runTest {
-        val testDispatcher = StandardTestDispatcher(testScheduler)
-        val testScope = TestScope(testDispatcher)
+    private class FakeCaptureProvider(
+        private val captureDelayMs: Long = 0L,
+        private val frameBitmap: Bitmap = Bitmap.createBitmap(50, 50, Bitmap.Config.ARGB_8888)
+    ) : ScreenCaptureProvider {
+        private val _isReady = MutableStateFlow(true)
+        override val isReady: StateFlow<Boolean> = _isReady.asStateFlow()
 
-        val fakeAnalyzer = object : VisionAnalyzer {
-            override suspend fun analyze(
-                bitmap: Bitmap,
-                context: AnalysisContext,
-                settings: CaptureSettings
-            ): AnalysisResult {
-                return AnalysisResult(
-                    contextName = context.name,
-                    summary = "Analysis Complete",
-                    observations = emptyList(),
-                    conclusion = "OK",
-                    rawResponse = "",
-                    isSuccess = true,
-                    errorMessage = null,
-                    processingDurationMs = 10L
-                )
-            }
-
-            override suspend fun testConnection(): ConnectionTestResult {
-                return ConnectionTestResult.Success("OK")
-            }
+        override suspend fun captureSingleFrame(): CaptureResult {
+            if (captureDelayMs > 0) delay(captureDelayMs)
+            return CaptureResult.Success(frameBitmap)
         }
-
-        val controller = MonitoringController(fakeAnalyzer, testScope)
-        assertEquals(MonitoringState.Idle, controller.state.value)
-
-        // START
-        controller.startMonitoring(
-            contextProvider = { AnalysisContext.DEFAULT },
-            settingsProvider = { CaptureSettings.DEFAULT }
-        )
-        // STOP immediately
-        controller.stopMonitoring()
-        assertEquals(MonitoringState.Idle, controller.state.value)
-
-        // START again
-        controller.startMonitoring(
-            contextProvider = { AnalysisContext.DEFAULT },
-            settingsProvider = { CaptureSettings.DEFAULT }
-        )
-        advanceUntilIdle()
-
-        // Clean STOP
-        controller.stopMonitoring()
-        advanceUntilIdle()
-        assertEquals(MonitoringState.Idle, controller.state.value)
     }
 
     @Test
-    fun testStartStopStartStopSequence() = runTest {
+    fun startStopLeavesIdle() = runTest {
         val testDispatcher = StandardTestDispatcher(testScheduler)
         val testScope = TestScope(testDispatcher)
 
         val fakeAnalyzer = object : VisionAnalyzer {
-            override suspend fun analyze(
-                bitmap: Bitmap,
-                context: AnalysisContext,
-                settings: CaptureSettings
-            ): AnalysisResult {
+            override suspend fun analyze(bitmap: Bitmap, context: AnalysisContext, settings: CaptureSettings): AnalysisResult {
                 return AnalysisResult(
                     contextName = context.name,
-                    summary = "Result",
+                    summary = "Summary",
                     observations = emptyList(),
                     conclusion = "OK",
                     rawResponse = "",
@@ -205,24 +164,12 @@ class MonitoringControllerLifecycleRaceTest {
                     processingDurationMs = 10L
                 )
             }
-
-            override suspend fun testConnection(): ConnectionTestResult {
-                return ConnectionTestResult.Success("OK")
-            }
+            override suspend fun testConnection(): ConnectionTestResult = ConnectionTestResult.Success("OK")
         }
 
-        val controller = MonitoringController(fakeAnalyzer, testScope)
+        val controller = MonitoringController(fakeAnalyzer, testScope, FakeCaptureProvider())
 
-        // START -> STOP -> START -> STOP rapid succession
-        controller.startMonitoring(
-            contextProvider = { AnalysisContext.DEFAULT },
-            settingsProvider = { CaptureSettings.DEFAULT }
-        )
-        controller.stopMonitoring()
-        controller.startMonitoring(
-            contextProvider = { AnalysisContext.DEFAULT },
-            settingsProvider = { CaptureSettings.DEFAULT }
-        )
+        controller.startMonitoring({ AnalysisContext.DEFAULT }, { CaptureSettings.DEFAULT })
         controller.stopMonitoring()
 
         advanceUntilIdle()
@@ -231,74 +178,182 @@ class MonitoringControllerLifecycleRaceTest {
     }
 
     @Test
-    fun testStopWhileGeminiIsRunningPreventsStalePublish() = runTest {
+    fun startStopStartCreatesOnlyOneActiveLoop() = runTest {
         val testDispatcher = StandardTestDispatcher(testScheduler)
         val testScope = TestScope(testDispatcher)
 
-        val analysisStarted = CompletableDeferred<Unit>()
-        val analysisGate = CompletableDeferred<Unit>()
-
+        var analysisCallCount = 0
         val fakeAnalyzer = object : VisionAnalyzer {
-            override suspend fun analyze(
-                bitmap: Bitmap,
-                context: AnalysisContext,
-                settings: CaptureSettings
-            ): AnalysisResult {
-                analysisStarted.complete(Unit)
-                analysisGate.await() // block until test says continue
+            override suspend fun analyze(bitmap: Bitmap, context: AnalysisContext, settings: CaptureSettings): AnalysisResult {
+                analysisCallCount++
                 return AnalysisResult(
                     contextName = context.name,
-                    summary = "Stale Result",
+                    summary = "Analysis $analysisCallCount",
+                    observations = emptyList(),
+                    conclusion = "OK",
+                    rawResponse = "",
+                    isSuccess = true,
+                    errorMessage = null,
+                    processingDurationMs = 10L
+                )
+            }
+            override suspend fun testConnection(): ConnectionTestResult = ConnectionTestResult.Success("OK")
+        }
+
+        val controller = MonitoringController(fakeAnalyzer, testScope, FakeCaptureProvider())
+
+        controller.startMonitoring({ AnalysisContext.DEFAULT }, { CaptureSettings.DEFAULT })
+        controller.stopMonitoring()
+        controller.startMonitoring({ AnalysisContext.DEFAULT }, { CaptureSettings.DEFAULT })
+
+        advanceTimeBy(100)
+        assertTrue(controller.isMonitoring)
+
+        controller.stopMonitoring()
+        advanceUntilIdle()
+        assertEquals(MonitoringState.Idle, controller.state.value)
+    }
+
+    @Test
+    fun startStopStartStopLeavesNoActiveLoop() = runTest {
+        val testDispatcher = StandardTestDispatcher(testScheduler)
+        val testScope = TestScope(testDispatcher)
+
+        val fakeAnalyzer = object : VisionAnalyzer {
+            override suspend fun analyze(bitmap: Bitmap, context: AnalysisContext, settings: CaptureSettings): AnalysisResult {
+                return AnalysisResult(
+                    contextName = context.name,
+                    summary = "Summary",
+                    observations = emptyList(),
+                    conclusion = "OK",
+                    rawResponse = "",
+                    isSuccess = true,
+                    errorMessage = null,
+                    processingDurationMs = 10L
+                )
+            }
+            override suspend fun testConnection(): ConnectionTestResult = ConnectionTestResult.Success("OK")
+        }
+
+        val controller = MonitoringController(fakeAnalyzer, testScope, FakeCaptureProvider())
+
+        controller.startMonitoring({ AnalysisContext.DEFAULT }, { CaptureSettings.DEFAULT })
+        controller.stopMonitoring()
+        controller.startMonitoring({ AnalysisContext.DEFAULT }, { CaptureSettings.DEFAULT })
+        controller.stopMonitoring()
+
+        advanceUntilIdle()
+        assertEquals(MonitoringState.Idle, controller.state.value)
+        assertFalse(controller.isMonitoring)
+    }
+
+    @Test
+    fun stopDuringCapture() = runTest {
+        val testDispatcher = StandardTestDispatcher(testScheduler)
+        val testScope = TestScope(testDispatcher)
+
+        val captureStarted = CompletableDeferred<Unit>()
+        val captureGate = CompletableDeferred<Unit>()
+
+        val blockingCaptureProvider = object : ScreenCaptureProvider {
+            private val _ready = MutableStateFlow(true)
+            override val isReady: StateFlow<Boolean> = _ready.asStateFlow()
+
+            override suspend fun captureSingleFrame(): CaptureResult {
+                captureStarted.complete(Unit)
+                captureGate.await()
+                return CaptureResult.Success(Bitmap.createBitmap(10, 10, Bitmap.Config.ARGB_8888))
+            }
+        }
+
+        var analyzeCalled = false
+        val fakeAnalyzer = object : VisionAnalyzer {
+            override suspend fun analyze(bitmap: Bitmap, context: AnalysisContext, settings: CaptureSettings): AnalysisResult {
+                analyzeCalled = true
+                return AnalysisResult(
+                    contextName = context.name,
+                    summary = "Summary",
+                    observations = emptyList(),
+                    conclusion = "OK",
+                    rawResponse = "",
+                    isSuccess = true,
+                    errorMessage = null,
+                    processingDurationMs = 10L
+                )
+            }
+            override suspend fun testConnection(): ConnectionTestResult = ConnectionTestResult.Success("OK")
+        }
+
+        val controller = MonitoringController(fakeAnalyzer, testScope, blockingCaptureProvider)
+
+        controller.startMonitoring({ AnalysisContext.DEFAULT }, { CaptureSettings.DEFAULT })
+        advanceTimeBy(100)
+
+        // Capture is in-flight; call stop
+        controller.stopMonitoring()
+        assertEquals(MonitoringState.Idle, controller.state.value)
+
+        // Let the blocked capture complete
+        captureGate.complete(Unit)
+        advanceUntilIdle()
+
+        assertFalse("AI analyzer must not be invoked when capture was stopped", analyzeCalled)
+        assertEquals(MonitoringState.Idle, controller.state.value)
+    }
+
+    @Test
+    fun stopDuringGemini() = runTest {
+        val testDispatcher = StandardTestDispatcher(testScheduler)
+        val testScope = TestScope(testDispatcher)
+
+        val geminiStarted = CompletableDeferred<Unit>()
+        val geminiGate = CompletableDeferred<Unit>()
+
+        val fakeAnalyzer = object : VisionAnalyzer {
+            override suspend fun analyze(bitmap: Bitmap, context: AnalysisContext, settings: CaptureSettings): AnalysisResult {
+                geminiStarted.complete(Unit)
+                geminiGate.await()
+                return AnalysisResult(
+                    contextName = context.name,
+                    summary = "Stale Summary",
                     observations = emptyList(),
                     conclusion = "Stale",
                     rawResponse = "",
                     isSuccess = true,
                     errorMessage = null,
-                    processingDurationMs = 50L
+                    processingDurationMs = 10L
                 )
             }
-
-            override suspend fun testConnection(): ConnectionTestResult {
-                return ConnectionTestResult.Success("OK")
-            }
+            override suspend fun testConnection(): ConnectionTestResult = ConnectionTestResult.Success("OK")
         }
 
-        val controller = MonitoringController(fakeAnalyzer, testScope)
+        val controller = MonitoringController(fakeAnalyzer, testScope, FakeCaptureProvider())
 
-        controller.startMonitoring(
-            contextProvider = { AnalysisContext.DEFAULT },
-            settingsProvider = { CaptureSettings.DEFAULT }
-        )
+        controller.startMonitoring({ AnalysisContext.DEFAULT }, { CaptureSettings.DEFAULT })
         advanceTimeBy(100)
 
-        // STOP while analysis is waiting
+        // Gemini in-flight; call stop
         controller.stopMonitoring()
         assertEquals(MonitoringState.Idle, controller.state.value)
-        assertFalse(controller.isMonitoring)
 
-        // Release the gated analysis
-        analysisGate.complete(Unit)
+        // Release the gated gemini analysis
+        geminiGate.complete(Unit)
         advanceUntilIdle()
 
-        // Stale result MUST NOT be published
-        assertNull("Stale analysis result must not be published to latestResult", controller.latestResult.value)
+        assertNull("Stale result must never be published", controller.latestResult.value)
         assertEquals(MonitoringState.Idle, controller.state.value)
     }
 
     @Test
-    fun testStopDuringDelayTimer() = runTest {
+    fun stopDuringLongDelay() = runTest {
         val testDispatcher = StandardTestDispatcher(testScheduler)
         val testScope = TestScope(testDispatcher)
 
         val fakeAnalyzer = object : VisionAnalyzer {
-            override suspend fun analyze(
-                bitmap: Bitmap,
-                context: AnalysisContext,
-                settings: CaptureSettings
-            ): AnalysisResult {
+            override suspend fun analyze(bitmap: Bitmap, context: AnalysisContext, settings: CaptureSettings): AnalysisResult {
                 return AnalysisResult(
                     contextName = context.name,
-                    summary = "First Result",
+                    summary = "Summary 1",
                     observations = emptyList(),
                     conclusion = "OK",
                     rawResponse = "",
@@ -307,26 +362,101 @@ class MonitoringControllerLifecycleRaceTest {
                     processingDurationMs = 10L
                 )
             }
-
-            override suspend fun testConnection(): ConnectionTestResult {
-                return ConnectionTestResult.Success("OK")
-            }
+            override suspend fun testConnection(): ConnectionTestResult = ConnectionTestResult.Success("OK")
         }
 
-        val controller = MonitoringController(fakeAnalyzer, testScope)
+        val controller = MonitoringController(fakeAnalyzer, testScope, FakeCaptureProvider())
 
-        controller.startMonitoring(
-            contextProvider = { AnalysisContext.DEFAULT },
-            settingsProvider = { CaptureSettings(delaySeconds = 60) }
-        )
+        // 600-second maximum delay
+        controller.startMonitoring({ AnalysisContext.DEFAULT }, { CaptureSettings(delaySeconds = 600) })
         advanceTimeBy(500)
 
-        // Stop during delay
+        // Stop in the middle of the 600s delay
         controller.stopMonitoring()
         advanceUntilIdle()
 
         assertEquals(MonitoringState.Idle, controller.state.value)
         assertFalse(controller.isMonitoring)
+    }
+
+    @Test
+    fun obsoleteSessionCannotPublishResult() = runTest {
+        val testDispatcher = StandardTestDispatcher(testScheduler)
+        val testScope = TestScope(testDispatcher)
+
+        val geminiGate = CompletableDeferred<Unit>()
+        var sessionCount = 0
+
+        val fakeAnalyzer = object : VisionAnalyzer {
+            override suspend fun analyze(bitmap: Bitmap, context: AnalysisContext, settings: CaptureSettings): AnalysisResult {
+                sessionCount++
+                if (sessionCount == 1) {
+                    geminiGate.await() // Hold session 1
+                }
+                return AnalysisResult(
+                    contextName = context.name,
+                    summary = "Result $sessionCount",
+                    observations = emptyList(),
+                    conclusion = "OK",
+                    rawResponse = "",
+                    isSuccess = true,
+                    errorMessage = null,
+                    processingDurationMs = 10L
+                )
+            }
+            override suspend fun testConnection(): ConnectionTestResult = ConnectionTestResult.Success("OK")
+        }
+
+        val controller = MonitoringController(fakeAnalyzer, testScope, FakeCaptureProvider())
+
+        // Session 1
+        controller.startMonitoring({ AnalysisContext.DEFAULT }, { CaptureSettings.DEFAULT })
+        advanceTimeBy(100)
+
+        // Session 1 is stopped and Session 2 is started
+        controller.stopMonitoring()
+        controller.startMonitoring({ AnalysisContext.DEFAULT }, { CaptureSettings.DEFAULT })
+
+        // Release session 1
+        geminiGate.complete(Unit)
+        advanceTimeBy(200)
+
+        // Only session 2 should be published
+        controller.stopMonitoring()
+        advanceUntilIdle()
+
+        assertEquals(MonitoringState.Idle, controller.state.value)
+    }
+
+    @Test
+    fun obsoleteSessionCannotPublishState() = runTest {
+        val testDispatcher = StandardTestDispatcher(testScheduler)
+        val testScope = TestScope(testDispatcher)
+
+        val fakeAnalyzer = object : VisionAnalyzer {
+            override suspend fun analyze(bitmap: Bitmap, context: AnalysisContext, settings: CaptureSettings): AnalysisResult {
+                return AnalysisResult(
+                    contextName = context.name,
+                    summary = "Summary",
+                    observations = emptyList(),
+                    conclusion = "OK",
+                    rawResponse = "",
+                    isSuccess = true,
+                    errorMessage = null,
+                    processingDurationMs = 10L
+                )
+            }
+            override suspend fun testConnection(): ConnectionTestResult = ConnectionTestResult.Success("OK")
+        }
+
+        val controller = MonitoringController(fakeAnalyzer, testScope, FakeCaptureProvider())
+
+        controller.startMonitoring({ AnalysisContext.DEFAULT }, { CaptureSettings.DEFAULT })
+        controller.stopMonitoring()
+
+        advanceUntilIdle()
+        // Obsolete session must not leave state in Capturing, Analyzing, or Waiting
+        assertEquals(MonitoringState.Idle, controller.state.value)
     }
 
     @Test
