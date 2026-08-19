@@ -17,7 +17,12 @@ data class GeminiModel(
     val name: String, // e.g. "models/gemini-2.5-flash"
     val displayName: String,
     val description: String,
-    val supportedGenerationMethods: List<String>
+    val supportedGenerationMethods: List<String>,
+    val inputTokenLimit: Int? = null,
+    val outputTokenLimit: Int? = null,
+    val version: String? = null,
+    val baseModelId: String? = null,
+    val isVisionCapable: Boolean = false
 ) {
     val modelId: String
         get() = name.removePrefix("models/")
@@ -31,7 +36,7 @@ data class GeminiModel(
 data class GeminiQuotaInfo(
     val status: String = "Not Configured", // "Connected", "Not Configured", "Error"
     val quota: String = "Unknown",         // "Available", "Limited", "Unknown"
-    val rateLimit: String = "Normal",      // "Normal", "Limited"
+    val rateLimit: String = "Normal",      // "Normal", "Active"
     val lastQuotaError: String = "None",
     val retryAfterSeconds: Int? = null
 )
@@ -55,7 +60,8 @@ interface VisionAnalyzer {
     suspend fun testConnection(): ConnectionTestResult
 
     /**
-     * Discovers available models supporting generateContent from Gemini API.
+     * Discovers available models supporting generateContent from Gemini API with full pagination.
      */
     suspend fun discoverModels(): Result<List<GeminiModel>>
 }
+

@@ -69,6 +69,7 @@ import com.example.ai.ConnectionTestResult
 import com.example.ui.components.DelaySelector
 import com.example.ui.theme.EmeraldSuccess
 import com.example.ui.theme.NeonCyan
+import com.example.ui.theme.NeonViolet
 import com.example.ui.theme.NeonVioletLight
 import com.example.ui.theme.RoseError
 import com.example.ui.theme.Slate700
@@ -89,6 +90,7 @@ fun SettingsScreen(
     val testResult by viewModel.testResult.collectAsState()
     val selectedModel by viewModel.selectedModel.collectAsState()
     val discoveredModels by viewModel.discoveredModels.collectAsState()
+    val modelValidationMessage by viewModel.modelValidationMessage.collectAsState()
     val quotaInfo by viewModel.quotaInfo.collectAsState()
 
     var inputKeyText by remember { mutableStateOf("") }
@@ -111,10 +113,65 @@ fun SettingsScreen(
                 color = Color.White
             )
             Text(
-                text = "Manage your Gemini API Key, model picker, delays, and resolution.",
+                text = "Manage your Gemini API Key, dynamic model picker, delays, and resolution.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+        }
+
+        // Model Validation Banner (if previously selected model became unavailable)
+        if (modelValidationMessage != null) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(Color(0x22F43F5E))
+                    .border(1.dp, RoseError, RoundedCornerShape(12.dp))
+                    .padding(14.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Error,
+                            contentDescription = null,
+                            tint = RoseError,
+                            modifier = Modifier.size(22.dp)
+                        )
+                        Column {
+                            Text(
+                                text = "Model Selection Updated",
+                                fontWeight = FontWeight.Bold,
+                                color = RoseError,
+                                fontSize = 13.sp
+                            )
+                            Text(
+                                text = modelValidationMessage ?: "",
+                                color = Color.White,
+                                fontSize = 12.sp
+                            )
+                        }
+                    }
+                    IconButton(
+                        onClick = { viewModel.dismissModelValidationMessage() },
+                        modifier = Modifier.size(24.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Clear,
+                            contentDescription = "Dismiss",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                }
+            }
         }
 
         // Gemini API Key Management Card (BYOK)
@@ -524,81 +581,119 @@ fun SettingsScreen(
                     }
                 }
 
-                val modelsToShow = if (discoveredModels.isNotEmpty()) {
-                    discoveredModels
-                } else {
-                    listOf(
-                        com.example.ai.GeminiModel(
-                            name = "models/gemini-2.5-flash",
-                            displayName = "Gemini 2.5 Flash",
-                            description = "Fast, multimodal, high-efficiency screen analyzer",
-                            supportedGenerationMethods = listOf("generateContent")
-                        ),
-                        com.example.ai.GeminiModel(
-                            name = "models/gemini-2.0-flash",
-                            displayName = "Gemini 2.0 Flash",
-                            description = "Next-generation multimodal reasoning and vision",
-                            supportedGenerationMethods = listOf("generateContent")
-                        ),
-                        com.example.ai.GeminiModel(
-                            name = "models/gemini-1.5-flash",
-                            displayName = "Gemini 1.5 Flash",
-                            description = "Lightweight multimodal model",
-                            supportedGenerationMethods = listOf("generateContent")
-                        ),
-                        com.example.ai.GeminiModel(
-                            name = "models/gemini-1.5-pro",
-                            displayName = "Gemini 1.5 Pro",
-                            description = "High-reasoning multimodal model",
-                            supportedGenerationMethods = listOf("generateContent")
-                        )
-                    )
-                }
-
-                modelsToShow.forEach { model ->
-                    val isSelected = selectedModel == model.modelId || selectedModel == model.name
-                    Row(
+                if (discoveredModels.isEmpty()) {
+                    Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .testTag("model_option_${model.modelId}")
                             .clip(RoundedCornerShape(12.dp))
-                            .background(if (isSelected) Slate800 else Color.Transparent)
-                            .border(
-                                1.dp,
-                                if (isSelected) NeonVioletLight else Slate700.copy(alpha = 0.5f),
-                                RoundedCornerShape(12.dp)
-                            )
-                            .clickable {
-                                viewModel.selectModel(model.modelId)
-                            }
-                            .padding(14.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
+                            .background(Slate800.copy(alpha = 0.5f))
+                            .border(1.dp, Slate700.copy(alpha = 0.5f), RoundedCornerShape(12.dp))
+                            .padding(16.dp)
                     ) {
-                        Column(modifier = Modifier.weight(1f)) {
+                        Column(
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
                             Text(
-                                text = model.displayName,
-                                style = MaterialTheme.typography.titleSmall,
-                                fontWeight = FontWeight.Bold,
-                                color = if (isSelected) NeonVioletLight else Color.White
+                                text = "No Gemini models discovered yet.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
-                            if (model.description.isNotBlank()) {
-                                Text(
-                                    text = model.description,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    maxLines = 2
+                            Text(
+                                text = "Save your API key and tap 'Test & Discover' above to dynamically fetch available models.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Slate700.copy(alpha = 0.9f),
+                                textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                            )
+                            if (hasApiKey) {
+                                Button(
+                                    onClick = { viewModel.fetchAvailableModels() },
+                                    modifier = Modifier.padding(top = 6.dp),
+                                    shape = RoundedCornerShape(10.dp),
+                                    colors = ButtonDefaults.buttonColors(containerColor = NeonViolet)
+                                ) {
+                                    Text("Discover Models", color = Color.White, fontWeight = FontWeight.Bold)
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    discoveredModels.forEach { model ->
+                        val isSelected = selectedModel == model.modelId || selectedModel == model.name
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("model_option_${model.modelId}")
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(if (isSelected) Slate800 else Color.Transparent)
+                                .border(
+                                    1.dp,
+                                    if (isSelected) NeonVioletLight else Slate700.copy(alpha = 0.5f),
+                                    RoundedCornerShape(12.dp)
+                                )
+                                .clickable {
+                                    viewModel.selectModel(model.modelId)
+                                }
+                                .padding(14.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Text(
+                                        text = model.displayName,
+                                        style = MaterialTheme.typography.titleSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (isSelected) NeonVioletLight else Color.White
+                                    )
+                                    if (model.isVisionCapable) {
+                                        Box(
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(6.dp))
+                                                .background(Color(0x2200E5FF))
+                                                .padding(horizontal = 6.dp, vertical = 2.dp)
+                                        ) {
+                                            Text(
+                                                text = "VISION",
+                                                fontSize = 9.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = NeonCyan
+                                            )
+                                        }
+                                    }
+                                }
+                                if (model.description.isNotBlank()) {
+                                    Text(
+                                        text = model.description,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 2
+                                    )
+                                }
+                            }
+                            if (isSelected) {
+                                Icon(
+                                    imageVector = Icons.Default.Check,
+                                    contentDescription = "Selected",
+                                    tint = NeonVioletLight,
+                                    modifier = Modifier.size(18.dp)
                                 )
                             }
                         }
-                        if (isSelected) {
-                            Icon(
-                                imageVector = Icons.Default.Check,
-                                contentDescription = "Selected",
-                                tint = NeonVioletLight,
-                                modifier = Modifier.size(18.dp)
-                            )
-                        }
+                    }
+
+                    if (selectedModel.isBlank()) {
+                        Text(
+                            text = "⚠ Please select a model above to begin screen analysis.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = RoseError,
+                            fontWeight = FontWeight.SemiBold
+                        )
                     }
                 }
             }

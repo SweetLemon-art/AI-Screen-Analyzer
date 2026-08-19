@@ -90,11 +90,11 @@ class SettingsRepository(context: Context) {
     }
 
     fun loadSelectedModel(): String {
-        return prefs.getString(KEY_SELECTED_MODEL, DEFAULT_MODEL) ?: DEFAULT_MODEL
+        return prefs.getString(KEY_SELECTED_MODEL, "") ?: ""
     }
 
     fun saveSelectedModel(model: String) {
-        val cleanModel = model.trim().removePrefix("models/").ifBlank { DEFAULT_MODEL }
+        val cleanModel = model.trim().removePrefix("models/")
         prefs.edit().putString(KEY_SELECTED_MODEL, cleanModel).apply()
     }
 
@@ -112,12 +112,23 @@ class SettingsRepository(context: Context) {
                         methods.add(methodsArray.optString(j))
                     }
                 }
+                val inputLimit = if (obj.has("inputTokenLimit")) obj.optInt("inputTokenLimit") else null
+                val outputLimit = if (obj.has("outputTokenLimit")) obj.optInt("outputTokenLimit") else null
+                val version = if (obj.has("version")) obj.optString("version", null) else null
+                val baseModelId = if (obj.has("baseModelId")) obj.optString("baseModelId", null) else null
+                val isVision = obj.optBoolean("isVisionCapable", false)
+
                 list.add(
                     GeminiModel(
                         name = obj.getString("name"),
                         displayName = obj.optString("displayName", obj.getString("name")),
                         description = obj.optString("description", ""),
-                        supportedGenerationMethods = methods
+                        supportedGenerationMethods = methods,
+                        inputTokenLimit = inputLimit,
+                        outputTokenLimit = outputLimit,
+                        version = version,
+                        baseModelId = baseModelId,
+                        isVisionCapable = isVision
                     )
                 )
             }
@@ -137,6 +148,11 @@ class SettingsRepository(context: Context) {
                 val methodsArr = JSONArray()
                 m.supportedGenerationMethods.forEach { methodsArr.put(it) }
                 put("methods", methodsArr)
+                m.inputTokenLimit?.let { put("inputTokenLimit", it) }
+                m.outputTokenLimit?.let { put("outputTokenLimit", it) }
+                m.version?.let { put("version", it) }
+                m.baseModelId?.let { put("baseModelId", it) }
+                put("isVisionCapable", m.isVisionCapable)
             }
             jsonArray.put(obj)
         }
@@ -144,7 +160,6 @@ class SettingsRepository(context: Context) {
     }
 
     companion object {
-        const val DEFAULT_MODEL = "gemini-2.5-flash"
         private const val PREFS_NAME = "ai_screen_analyzer_settings"
         private const val KEY_DELAY = "capture_delay_seconds"
         private const val KEY_RESOLUTION = "max_resolution_dimension"

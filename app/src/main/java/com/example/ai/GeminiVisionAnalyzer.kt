@@ -30,7 +30,7 @@ import kotlin.math.pow
 
 class GeminiVisionAnalyzer(
     private val apiKeyStore: GeminiApiKeyStore,
-    private val modelProvider: () -> String = { "gemini-2.5-flash" },
+    private val modelProvider: () -> String? = { null },
     private val client: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
@@ -51,9 +51,8 @@ class GeminiVisionAnalyzer(
 
     private fun getCleanBaseUrl(): String = baseUrl.trimEnd('/')
 
-    private fun getGenerateContentUrl(): String {
-        val rawModel = modelProvider().trim().ifBlank { "gemini-2.5-flash" }
-        val cleanModel = rawModel.removePrefix("models/")
+    private fun getGenerateContentUrl(modelId: String): String {
+        val cleanModel = modelId.trim().removePrefix("models/")
         return "${getCleanBaseUrl()}/v1beta/models/$cleanModel:generateContent"
     }
 
@@ -83,6 +82,25 @@ class GeminiVisionAnalyzer(
                 rawResponse = "",
                 isSuccess = false,
                 errorMessage = "API key missing. Configure your Gemini API key in Settings.",
+                processingDurationMs = duration
+            )
+        }
+
+        val rawSelectedModel = modelProvider()?.trim()
+        val selectedModelId = rawSelectedModel?.removePrefix("models/")
+        if (selectedModelId.isNullOrBlank()) {
+            val duration = System.currentTimeMillis() - startTime
+            return@withContext AnalysisResult(
+                contextName = context.name,
+                summary = "No Gemini model selected.",
+                observations = listOf(
+                    "No model has been selected for Gemini analysis.",
+                    "Please select a discovered Gemini model in Settings."
+                ),
+                conclusion = "Select a model in Settings to begin screen analysis.",
+                rawResponse = "",
+                isSuccess = false,
+                errorMessage = "No Gemini model selected.",
                 processingDurationMs = duration
             )
         }
@@ -168,7 +186,7 @@ class GeminiVisionAnalyzer(
 
             while (attempt <= maxRetries) {
                 val request = Request.Builder()
-                    .url(getGenerateContentUrl())
+                    .url(getGenerateContentUrl(selectedModelId))
                     .addHeader("x-goog-api-key", apiKey)
                     .post(requestBody)
                     .build()
@@ -215,7 +233,7 @@ class GeminiVisionAnalyzer(
 
                     _quotaInfo.value = _quotaInfo.value.copy(
                         status = "Connected",
-                        rateLimit = "Limited",
+                        rateLimit = "Active",
                         quota = "Limited",
                         lastQuotaError = "HTTP 429: Gemini API quota or rate limit reached.",
                         retryAfterSeconds = retryAfterSeconds
@@ -314,19 +332,9 @@ class GeminiVisionAnalyzer(
             return@withContext ConnectionTestResult.Error("API key is not configured. Please enter a valid Gemini API key.")
         }
 
-        try {
-            val request = Request.Builder()
-                .url(getListModelsUrl())
-                .addHeader("x-goog-api-key", apiKey)
-                .get()
-                .build()
-
-            val (statusCode, responseBodyString, isSuccess) = executeCancellationAwareCall(request).use { response ->
-                Triple(response.code, response.body?.string().orEmpty(), response.isSuccessful)
-            }
-
-            if (isSuccess) {
-                val models = parseModelsList(responseBodyString)
+        val discoveryResult = discoverModels()
+        discoveryResult.fold(
+            onSuccess = { models ->
                 _quotaInfo.value = GeminiQuotaInfo(
                     status = "Connected",
                     quota = "Available",
@@ -338,23 +346,76 @@ class GeminiVisionAnalyzer(
                     message = "Connection successful! Discovered ${models.size} available Gemini model(s).",
                     models = models
                 )
-            } else {
-                if (statusCode == 429) {
-                    _quotaInfo.value = _quotaInfo.value.copy(
-                        status = "Connected",
-                        rateLimit = "Limited",
-                        quota = "Limited",
-                        lastQuotaError = "HTTP 429: Gemini API quota or rate limit reached."
-                    )
-                } else if (statusCode in 401..403) {
-                    _quotaInfo.value = _quotaInfo.value.copy(
-                        status = "Error",
-                        lastQuotaError = "Invalid or unauthorized API key"
-                    )
-                }
-                val safeError = sanitizeHttpError(statusCode, responseBodyString)
-                ConnectionTestResult.Error(safeError)
+            },
+            onFailure = { error ->
+                val errorMessage = error.localizedMessage ?: "Connection test failed."
+                ConnectionTestResult.Error(errorMessage)
             }
+        )
+    }
+
+    /**
+     * Discovers available models from Gemini API that support generateContent with full pagination.
+     */
+    override suspend fun discoverModels(): Result<List<GeminiModel>> = withContext(Dispatchers.IO) {
+        val apiKey = apiKeyStore.getApiKey()
+        if (apiKey.isNullOrBlank()) {
+            return@withContext Result.failure(IllegalStateException("API key missing. Configure your Gemini API key in Settings."))
+        }
+
+        val allModels = mutableListOf<GeminiModel>()
+        val seenPageTokens = mutableSetOf<String>()
+        var nextPageToken: String? = null
+
+        try {
+            do {
+                val url = if (nextPageToken.isNullOrBlank()) {
+                    getListModelsUrl()
+                } else {
+                    "${getListModelsUrl()}?pageToken=$nextPageToken"
+                }
+
+                val request = Request.Builder()
+                    .url(url)
+                    .addHeader("x-goog-api-key", apiKey)
+                    .get()
+                    .build()
+
+                val (statusCode, responseBodyString, isSuccess) = executeCancellationAwareCall(request).use { response ->
+                    Triple(response.code, response.body?.string().orEmpty(), response.isSuccessful)
+                }
+
+                if (!isSuccess) {
+                    if (statusCode == 429) {
+                        _quotaInfo.value = _quotaInfo.value.copy(
+                            status = "Connected",
+                            rateLimit = "Active",
+                            quota = "Limited",
+                            lastQuotaError = "HTTP 429: Gemini API quota or rate limit reached."
+                        )
+                    } else if (statusCode in 401..403) {
+                        _quotaInfo.value = _quotaInfo.value.copy(
+                            status = "Error",
+                            lastQuotaError = "Invalid or unauthorized API key"
+                        )
+                    }
+                    val safeError = sanitizeHttpError(statusCode, responseBodyString)
+                    return@withContext Result.failure(RuntimeException(safeError))
+                }
+
+                val page = parseModelsPage(responseBodyString)
+                allModels.addAll(page.models)
+
+                val token = page.nextPageToken
+                if (token.isNullOrBlank() || seenPageTokens.contains(token)) {
+                    nextPageToken = null
+                } else {
+                    seenPageTokens.add(token)
+                    nextPageToken = token
+                }
+            } while (nextPageToken != null)
+
+            Result.success(allModels)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -363,41 +424,7 @@ class GeminiVisionAnalyzer(
                 is java.net.SocketTimeoutException -> "Network timeout while reaching Gemini server."
                 else -> "Connection test failed: ${e.localizedMessage ?: "Check network connection."}"
             }
-            ConnectionTestResult.Error(safeError)
-        }
-    }
-
-    /**
-     * Discovers available models from Gemini API that support generateContent.
-     */
-    override suspend fun discoverModels(): Result<List<GeminiModel>> = withContext(Dispatchers.IO) {
-        val apiKey = apiKeyStore.getApiKey()
-        if (apiKey.isNullOrBlank()) {
-            return@withContext Result.failure(IllegalStateException("API key missing. Configure your Gemini API key in Settings."))
-        }
-
-        try {
-            val request = Request.Builder()
-                .url(getListModelsUrl())
-                .addHeader("x-goog-api-key", apiKey)
-                .get()
-                .build()
-
-            val (statusCode, responseBodyString, isSuccess) = executeCancellationAwareCall(request).use { response ->
-                Triple(response.code, response.body?.string().orEmpty(), response.isSuccessful)
-            }
-
-            if (isSuccess) {
-                val models = parseModelsList(responseBodyString)
-                Result.success(models)
-            } else {
-                val safeError = sanitizeHttpError(statusCode, responseBodyString)
-                Result.failure(RuntimeException(safeError))
-            }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            Result.failure(e)
+            Result.failure(RuntimeException(safeError, e))
         }
     }
 
@@ -420,40 +447,67 @@ class GeminiVisionAnalyzer(
         }
     }
 
-    fun parseModelsList(jsonString: String): List<GeminiModel> {
-        val result = mutableListOf<GeminiModel>()
-        try {
-            val root = JSONObject(jsonString)
-            val modelsArray = root.optJSONArray("models") ?: return emptyList()
-            for (i in 0 until modelsArray.length()) {
-                val modelObj = modelsArray.getJSONObject(i)
-                val name = modelObj.optString("name", "")
-                val displayName = modelObj.optString("displayName", name.removePrefix("models/"))
-                val description = modelObj.optString("description", "")
-                val methodsArray = modelObj.optJSONArray("supportedGenerationMethods")
-                val methods = mutableListOf<String>()
-                if (methodsArray != null) {
-                    for (j in 0 until methodsArray.length()) {
-                        methods.add(methodsArray.optString(j))
+    data class ModelsPage(
+        val models: List<GeminiModel>,
+        val nextPageToken: String?
+    )
+
+    fun parseModelsPage(jsonString: String): ModelsPage {
+        val root = JSONObject(jsonString)
+        val modelsArray = root.optJSONArray("models") ?: JSONArray()
+        val modelsList = mutableListOf<GeminiModel>()
+
+        for (i in 0 until modelsArray.length()) {
+            val modelObj = modelsArray.optJSONObject(i) ?: continue
+            val name = modelObj.optString("name", "").trim()
+            if (name.isBlank()) continue
+
+            val modelId = name.removePrefix("models/")
+            val displayName = modelObj.optString("displayName", modelId).ifBlank { modelId }
+            val description = modelObj.optString("description", "")
+            val methodsArray = modelObj.optJSONArray("supportedGenerationMethods")
+            val methods = mutableListOf<String>()
+            if (methodsArray != null) {
+                for (j in 0 until methodsArray.length()) {
+                    val method = methodsArray.optString(j)
+                    if (method.isNotBlank()) {
+                        methods.add(method)
                     }
                 }
-
-                // Filter for models supporting generateContent
-                if (methods.contains("generateContent")) {
-                    result.add(
-                        GeminiModel(
-                            name = name,
-                            displayName = displayName,
-                            description = description,
-                            supportedGenerationMethods = methods
-                        )
-                    )
-                }
             }
-        } catch (e: Exception) {
-            // Return collected models on parse issue
+
+            // Filter for models supporting generateContent
+            if (methods.contains("generateContent")) {
+                val inputTokenLimit = if (modelObj.has("inputTokenLimit")) modelObj.optInt("inputTokenLimit") else null
+                val outputTokenLimit = if (modelObj.has("outputTokenLimit")) modelObj.optInt("outputTokenLimit") else null
+                val version = if (modelObj.has("version")) modelObj.optString("version", null) else null
+                val baseModelId = if (modelObj.has("baseModelId")) modelObj.optString("baseModelId", null) else null
+
+                // Multimodal vision capability classification
+                val isVisionCapable = modelId.startsWith("gemini-") || modelId.startsWith("learnlm-")
+
+                modelsList.add(
+                    GeminiModel(
+                        name = name,
+                        displayName = displayName,
+                        description = description,
+                        supportedGenerationMethods = methods,
+                        inputTokenLimit = inputTokenLimit,
+                        outputTokenLimit = outputTokenLimit,
+                        version = version,
+                        baseModelId = baseModelId,
+                        isVisionCapable = isVisionCapable
+                    )
+                )
+            }
         }
-        return result
+
+        val nextPageToken = root.optString("nextPageToken", "").trim().ifBlank { null }
+        return ModelsPage(models = modelsList, nextPageToken = nextPageToken)
+    }
+
+    fun parseModelsList(jsonString: String): List<GeminiModel> {
+        return parseModelsPage(jsonString).models
     }
 
     private fun sanitizeHttpError(statusCode: Int, responseBody: String): String {

@@ -198,7 +198,118 @@ class GeminiVisionAnalyzerQuotaAndModelTest {
         val testResult = analyzer.testConnection()
         assertTrue(testResult is ConnectionTestResult.Error)
         assertEquals("Gemini API quota or rate limit reached.", (testResult as ConnectionTestResult.Error).message)
-        assertEquals("Limited", analyzer.quotaInfo.value.rateLimit)
+        assertEquals("Active", analyzer.quotaInfo.value.rateLimit)
+    }
+
+    // Multi-page Pagination Test
+    @Test
+    fun testMultiPagePaginationModelDiscovery() = runTest {
+        keyStore.saveApiKey("test-key")
+        val requestedUrls = mutableListOf<String>()
+
+        val page1Json = """
+            {
+              "models": [
+                {
+                  "name": "models/gemini-2.5-flash",
+                  "displayName": "Gemini 2.5 Flash",
+                  "description": "Page 1 Model",
+                  "supportedGenerationMethods": ["generateContent"],
+                  "inputTokenLimit": 1048576,
+                  "outputTokenLimit": 8192
+                }
+              ],
+              "nextPageToken": "page-2-token"
+            }
+        """.trimIndent()
+
+        val page2Json = """
+            {
+              "models": [
+                {
+                  "name": "models/gemini-2.0-flash",
+                  "displayName": "Gemini 2.0 Flash",
+                  "description": "Page 2 Model",
+                  "supportedGenerationMethods": ["generateContent"]
+                }
+              ]
+            }
+        """.trimIndent()
+
+        val client = createClient { chain ->
+            val url = chain.request().url.toString()
+            requestedUrls.add(url)
+            val body = if (url.contains("pageToken=page-2-token")) page2Json else page1Json
+            Response.Builder()
+                .request(chain.request())
+                .protocol(Protocol.HTTP_1_1)
+                .code(200)
+                .message("OK")
+                .body(body.toResponseBody("application/json".toMediaType()))
+                .build()
+        }
+
+        val analyzer = GeminiVisionAnalyzer(keyStore, client = client)
+        val result = analyzer.discoverModels()
+
+        assertTrue(result.isSuccess)
+        val models = result.getOrNull() ?: emptyList()
+        assertEquals(2, models.size)
+        assertEquals("gemini-2.5-flash", models[0].modelId)
+        assertTrue(models[0].isVisionCapable)
+        assertEquals(1048576, models[0].inputTokenLimit)
+        assertEquals("gemini-2.0-flash", models[1].modelId)
+        assertEquals(2, requestedUrls.size)
+    }
+
+    // Pagination loop prevention test
+    @Test
+    fun testPaginationStopsOnDuplicateNextPageToken() = runTest {
+        keyStore.saveApiKey("test-key")
+        var callCount = 0
+
+        val loopingPageJson = """
+            {
+              "models": [
+                {
+                  "name": "models/gemini-2.5-flash",
+                  "displayName": "Gemini 2.5 Flash",
+                  "supportedGenerationMethods": ["generateContent"]
+                }
+              ],
+              "nextPageToken": "stuck-token"
+            }
+        """.trimIndent()
+
+        val client = createClient { chain ->
+            callCount++
+            Response.Builder()
+                .request(chain.request())
+                .protocol(Protocol.HTTP_1_1)
+                .code(200)
+                .message("OK")
+                .body(loopingPageJson.toResponseBody("application/json".toMediaType()))
+                .build()
+        }
+
+        val analyzer = GeminiVisionAnalyzer(keyStore, client = client)
+        val result = analyzer.discoverModels()
+
+        assertTrue(result.isSuccess)
+        // First request receives "stuck-token", second request makes request with pageToken=stuck-token, receives "stuck-token" again, detects cycle and stops.
+        assertEquals(2, callCount)
+    }
+
+    // No model selected test
+    @Test
+    fun testNoModelSelectedReturnsExplicitError() = runTest {
+        keyStore.saveApiKey("test-key")
+        val analyzer = GeminiVisionAnalyzer(keyStore, modelProvider = { "" })
+        val bitmap = Bitmap.createBitmap(10, 10, Bitmap.Config.ARGB_8888)
+        val result = analyzer.analyze(bitmap, AnalysisContext.DEFAULT, CaptureSettings.DEFAULT)
+
+        assertFalse(result.isSuccess)
+        assertEquals("No Gemini model selected.", result.errorMessage)
     }
 
     // 6. 429 with Retry-After during analyze
@@ -239,7 +350,7 @@ class GeminiVisionAnalyzerQuotaAndModelTest {
             }
         }
 
-        val analyzer = GeminiVisionAnalyzer(keyStore, client = client)
+        val analyzer = GeminiVisionAnalyzer(keyStore, modelProvider = { "gemini-2.5-flash" }, client = client)
         val bitmap = Bitmap.createBitmap(10, 10, Bitmap.Config.ARGB_8888)
         val result = analyzer.analyze(bitmap, AnalysisContext.DEFAULT, CaptureSettings.DEFAULT)
 
@@ -285,7 +396,7 @@ class GeminiVisionAnalyzerQuotaAndModelTest {
             }
         }
 
-        val analyzer = GeminiVisionAnalyzer(keyStore, client = client)
+        val analyzer = GeminiVisionAnalyzer(keyStore, modelProvider = { "gemini-2.5-flash" }, client = client)
         val bitmap = Bitmap.createBitmap(10, 10, Bitmap.Config.ARGB_8888)
         val result = analyzer.analyze(bitmap, AnalysisContext.DEFAULT, CaptureSettings.DEFAULT)
 
@@ -312,7 +423,7 @@ class GeminiVisionAnalyzerQuotaAndModelTest {
                 .build()
         }
 
-        val analyzer = GeminiVisionAnalyzer(keyStore, client = client)
+        val analyzer = GeminiVisionAnalyzer(keyStore, modelProvider = { "gemini-2.5-flash" }, client = client)
         val bitmap = Bitmap.createBitmap(10, 10, Bitmap.Config.ARGB_8888)
         val result = analyzer.analyze(bitmap, AnalysisContext.DEFAULT, CaptureSettings.DEFAULT)
 
@@ -337,7 +448,7 @@ class GeminiVisionAnalyzerQuotaAndModelTest {
                 .build()
         }
 
-        val analyzer = GeminiVisionAnalyzer(keyStore, client = client)
+        val analyzer = GeminiVisionAnalyzer(keyStore, modelProvider = { "gemini-2.5-flash" }, client = client)
         val bitmap = Bitmap.createBitmap(10, 10, Bitmap.Config.ARGB_8888)
 
         val job = launch {
@@ -402,7 +513,7 @@ class GeminiVisionAnalyzerQuotaAndModelTest {
                 .build()
         }
 
-        val analyzer = GeminiVisionAnalyzer(keyStore, client = client)
+        val analyzer = GeminiVisionAnalyzer(keyStore, modelProvider = { "gemini-2.5-flash" }, client = client)
         val fakeCapture = object : ScreenCaptureProvider {
             override val isReady: StateFlow<Boolean> = MutableStateFlow(true).asStateFlow()
             override suspend fun captureSingleFrame(): CaptureResult =

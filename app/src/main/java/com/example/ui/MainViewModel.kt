@@ -36,6 +36,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _discoveredModels = MutableStateFlow(settingsRepository.loadDiscoveredModels())
     val discoveredModels: StateFlow<List<GeminiModel>> = _discoveredModels.asStateFlow()
 
+    // Model validation message (e.g. when selected model is no longer available)
+    private val _modelValidationMessage = MutableStateFlow<String?>(null)
+    val modelValidationMessage: StateFlow<String?> = _modelValidationMessage.asStateFlow()
+
     val visionAnalyzer = GeminiVisionAnalyzer(
         apiKeyStore = apiKeyStore,
         modelProvider = { _selectedModel.value }
@@ -89,10 +93,38 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _currentRoute.value = route
     }
 
+    fun dismissModelValidationMessage() {
+        _modelValidationMessage.value = null
+    }
+
     fun selectModel(modelId: String) {
-        val cleanModel = modelId.trim().removePrefix("models/").ifBlank { SettingsRepository.DEFAULT_MODEL }
+        val cleanModel = modelId.trim().removePrefix("models/")
         _selectedModel.value = cleanModel
         settingsRepository.saveSelectedModel(cleanModel)
+        _modelValidationMessage.value = null
+    }
+
+    private fun handleDiscoveredModels(models: List<GeminiModel>) {
+        if (models.isEmpty()) return
+        _discoveredModels.value = models
+        settingsRepository.saveDiscoveredModels(models)
+
+        val currentSelected = _selectedModel.value
+        val modelStillExists = models.any { it.modelId == currentSelected || it.name == currentSelected }
+
+        if (currentSelected.isNotBlank() && !modelStillExists) {
+            // Selected model is no longer available in the newly discovered list
+            _selectedModel.value = ""
+            settingsRepository.saveSelectedModel("")
+            _modelValidationMessage.value = "Selected Gemini model is no longer available."
+        } else if (currentSelected.isBlank()) {
+            // Auto-select the first vision-capable model if available, otherwise first generateContent model
+            val candidate = models.firstOrNull { it.isVisionCapable } ?: models.firstOrNull()
+            candidate?.let {
+                _selectedModel.value = it.modelId
+                settingsRepository.saveSelectedModel(it.modelId)
+            }
+        }
     }
 
     fun fetchAvailableModels() {
@@ -101,10 +133,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _isTestingConnection.value = true
             val result = visionAnalyzer.discoverModels()
             result.onSuccess { models ->
-                if (models.isNotEmpty()) {
-                    _discoveredModels.value = models
-                    settingsRepository.saveDiscoveredModels(models)
-                }
+                handleDiscoveredModels(models)
             }
             _isTestingConnection.value = false
         }
@@ -175,8 +204,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val result = visionAnalyzer.testConnection()
             _testResult.value = result
             if (result is ConnectionTestResult.Success && result.models.isNotEmpty()) {
-                _discoveredModels.value = result.models
-                settingsRepository.saveDiscoveredModels(result.models)
+                handleDiscoveredModels(result.models)
             }
             _isTestingConnection.value = false
         }
