@@ -31,6 +31,7 @@ import kotlin.math.pow
 class GeminiVisionAnalyzer(
     private val apiKeyStore: GeminiApiKeyStore,
     private val modelProvider: () -> String? = { null },
+    private val compatibleModelsProvider: () -> List<GeminiModel> = { emptyList() },
     private val client: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
@@ -45,7 +46,7 @@ class GeminiVisionAnalyzer(
     private fun getCleanBaseUrl(): String = baseUrl.trimEnd('/')
 
     private fun getGenerateContentUrl(modelId: String): String {
-        val cleanModel = modelId.trim().removePrefix("models/")
+        val cleanModel = normalizeModelId(modelId)
         return "${getCleanBaseUrl()}/v1beta/models/$cleanModel:generateContent"
     }
 
@@ -78,13 +79,13 @@ class GeminiVisionAnalyzer(
             )
         }
 
-        val rawSelectedModel = modelProvider()?.trim()
-        val selectedModelId = rawSelectedModel?.removePrefix("models/")
-        if (selectedModelId.isNullOrBlank()) {
+        val rawSelectedModel = modelProvider()
+        val selectedModelId = normalizeModelId(rawSelectedModel)
+        if (selectedModelId.isBlank()) {
             val duration = System.currentTimeMillis() - startTime
             return@withContext AnalysisResult(
                 contextName = context.name,
-                summary = "No Gemini model selected.",
+                summary = "NO_MODEL_SELECTED",
                 observations = listOf(
                     "No model has been selected for Gemini analysis.",
                     "Please select a discovered Gemini model in Settings."
@@ -92,7 +93,61 @@ class GeminiVisionAnalyzer(
                 conclusion = "Select a model in Settings to begin screen analysis.",
                 rawResponse = "",
                 isSuccess = false,
-                errorMessage = "No Gemini model selected.",
+                errorMessage = "NO_MODEL_SELECTED: No Gemini model selected.",
+                processingDurationMs = duration
+            )
+        }
+
+        // Generation safety guard: Validate against latest compatible models list
+        val compatibleList = compatibleModelsProvider()
+        val matchingModel = compatibleList.find { normalizeModelId(it.name) == selectedModelId }
+
+        if (matchingModel == null) {
+            val duration = System.currentTimeMillis() - startTime
+            return@withContext AnalysisResult(
+                contextName = context.name,
+                summary = "MODEL_NOT_AVAILABLE",
+                observations = listOf(
+                    "Selected model '$selectedModelId' is not present in the latest compatible model list.",
+                    "Please refresh model discovery in Settings."
+                ),
+                conclusion = "Selected model is unavailable.",
+                rawResponse = "",
+                isSuccess = false,
+                errorMessage = "MODEL_NOT_AVAILABLE: Selected model '$selectedModelId' is not available in discovered compatible models.",
+                processingDurationMs = duration
+            )
+        }
+
+        if (!matchingModel.supportedGenerationMethods.contains("generateContent")) {
+            val duration = System.currentTimeMillis() - startTime
+            return@withContext AnalysisResult(
+                contextName = context.name,
+                summary = "MODEL_NOT_AVAILABLE",
+                observations = listOf(
+                    "Selected model '$selectedModelId' does not support generateContent."
+                ),
+                conclusion = "Model does not support content generation.",
+                rawResponse = "",
+                isSuccess = false,
+                errorMessage = "MODEL_NOT_AVAILABLE: Model '$selectedModelId' does not support generateContent.",
+                processingDurationMs = duration
+            )
+        }
+
+        if (matchingModel.imageInputCapability != ImageInputCapability.SUPPORTED) {
+            val duration = System.currentTimeMillis() - startTime
+            return@withContext AnalysisResult(
+                contextName = context.name,
+                summary = "MODEL_NOT_IMAGE_CAPABLE",
+                observations = listOf(
+                    "Selected model '$selectedModelId' has not been verified to support image input.",
+                    "Image capability state is UNKNOWN or unsupported."
+                ),
+                conclusion = "Model cannot be used for visual screen analysis.",
+                rawResponse = "",
+                isSuccess = false,
+                errorMessage = "MODEL_NOT_IMAGE_CAPABLE: Selected model '$selectedModelId' does not support image input.",
                 processingDurationMs = duration
             )
         }
@@ -427,7 +482,7 @@ class GeminiVisionAnalyzer(
             val name = modelObj.optString("name", "").trim()
             if (name.isBlank()) continue
 
-            val modelId = name.removePrefix("models/")
+            val modelId = normalizeModelId(name)
             val displayName = modelObj.optString("displayName", modelId).ifBlank { modelId }
             val description = modelObj.optString("description", "")
             val methodsArray = modelObj.optJSONArray("supportedGenerationMethods")
@@ -441,26 +496,44 @@ class GeminiVisionAnalyzer(
                 }
             }
 
-            // Filter for models supporting generateContent
-            if (methods.contains("generateContent")) {
-                val inputTokenLimit = if (modelObj.has("inputTokenLimit")) modelObj.optInt("inputTokenLimit") else null
-                val outputTokenLimit = if (modelObj.has("outputTokenLimit")) modelObj.optInt("outputTokenLimit") else null
-                val version = if (modelObj.has("version")) modelObj.optString("version", null) else null
-                val baseModelId = if (modelObj.has("baseModelId")) modelObj.optString("baseModelId", null) else null
+            // Image input capability strategy (No guessing / No heuristics):
+            // We inspect only actual input modality metadata returned by the API endpoint.
+            // If the API returns supportedInputModalities or inputModalities containing "IMAGE",
+            // we mark it as SUPPORTED. Otherwise, it remains UNKNOWN.
+            // Model names, prefixes, or generateContent alone do NOT imply image capability.
+            val modalitiesArray = modelObj.optJSONArray("supportedInputModalities")
+                ?: modelObj.optJSONArray("inputModalities")
+                ?: modelObj.optJSONArray("supportedModalities")
 
-                modelsList.add(
-                    GeminiModel(
-                        name = name,
-                        displayName = displayName,
-                        description = description,
-                        supportedGenerationMethods = methods,
-                        inputTokenLimit = inputTokenLimit,
-                        outputTokenLimit = outputTokenLimit,
-                        version = version,
-                        baseModelId = baseModelId
-                    )
-                )
+            var capability = ImageInputCapability.UNKNOWN
+            if (modalitiesArray != null) {
+                for (j in 0 until modalitiesArray.length()) {
+                    val modality = modalitiesArray.optString(j, "").trim().uppercase()
+                    if (modality == "IMAGE" || modality == "IMAGE/JPEG" || modality == "IMAGE/PNG" || modality == "IMAGE/WEBP" || modality == "MODALITY_IMAGE") {
+                        capability = ImageInputCapability.SUPPORTED
+                        break
+                    }
+                }
             }
+
+            val inputTokenLimit = if (modelObj.has("inputTokenLimit")) modelObj.optInt("inputTokenLimit") else null
+            val outputTokenLimit = if (modelObj.has("outputTokenLimit")) modelObj.optInt("outputTokenLimit") else null
+            val version = if (modelObj.has("version")) modelObj.optString("version", null) else null
+            val baseModelId = if (modelObj.has("baseModelId")) modelObj.optString("baseModelId", null) else null
+
+            modelsList.add(
+                GeminiModel(
+                    name = name,
+                    displayName = displayName,
+                    description = description,
+                    supportedGenerationMethods = methods,
+                    inputTokenLimit = inputTokenLimit,
+                    outputTokenLimit = outputTokenLimit,
+                    version = version,
+                    baseModelId = baseModelId,
+                    imageInputCapability = capability
+                )
+            )
         }
 
         val nextPageToken = root.optString("nextPageToken", "").trim().ifBlank { null }

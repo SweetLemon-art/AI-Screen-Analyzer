@@ -42,7 +42,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     val visionAnalyzer = GeminiVisionAnalyzer(
         apiKeyStore = apiKeyStore,
-        modelProvider = { _selectedModel.value }
+        modelProvider = { _selectedModel.value },
+        compatibleModelsProvider = { _discoveredModels.value }
     )
     val controller = MonitoringController(visionAnalyzer, viewModelScope)
 
@@ -98,25 +99,47 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun selectModel(modelId: String) {
-        val cleanModel = modelId.trim().removePrefix("models/")
+        val cleanModel = com.example.ai.normalizeModelId(modelId)
         _selectedModel.value = cleanModel
         settingsRepository.saveSelectedModel(cleanModel)
         _modelValidationMessage.value = null
     }
 
-    private fun handleDiscoveredModels(models: List<GeminiModel>) {
-        if (models.isEmpty()) return
-        _discoveredModels.value = models
-        settingsRepository.saveDiscoveredModels(models)
+    fun clearSelectedModel() {
+        _selectedModel.value = ""
+        settingsRepository.clearSelectedModel()
+    }
 
-        val currentSelected = _selectedModel.value
-        val modelStillExists = models.any { it.modelId == currentSelected || it.name == currentSelected }
+    fun handleDiscoveredModels(freshModels: List<GeminiModel>) {
+        // Filter compatible models: Must support generateContent AND have ImageInputCapability.SUPPORTED
+        val compatibleModels = freshModels.filter {
+            it.supportedGenerationMethods.contains("generateContent") &&
+            it.imageInputCapability == com.example.ai.ImageInputCapability.SUPPORTED
+        }
 
-        if (currentSelected.isNotBlank() && !modelStillExists) {
-            // Selected model is no longer available in the newly discovered list
+        _discoveredModels.value = compatibleModels
+        settingsRepository.saveDiscoveredModels(compatibleModels)
+
+        if (compatibleModels.isEmpty()) {
+            clearSelectedModel()
+            _modelValidationMessage.value = "NO_COMPATIBLE_MODELS: No compatible vision models discovered."
+            return
+        }
+
+        // Fresh discovery validation against persisted selection
+        val persistedSelected = settingsRepository.loadSelectedModel()
+        if (persistedSelected.isNotBlank()) {
+            val modelStillExists = compatibleModels.any { it.modelId == persistedSelected }
+            if (modelStillExists) {
+                _selectedModel.value = persistedSelected
+                _modelValidationMessage.value = null
+            } else {
+                // Stale selection is cleared immediately
+                clearSelectedModel()
+                _modelValidationMessage.value = "MODEL_NOT_AVAILABLE: Selected model '$persistedSelected' is no longer available."
+            }
+        } else {
             _selectedModel.value = ""
-            settingsRepository.saveSelectedModel("")
-            _modelValidationMessage.value = "Selected Gemini model is no longer available."
         }
     }
 
@@ -127,6 +150,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val result = visionAnalyzer.discoverModels()
             result.onSuccess { models ->
                 handleDiscoveredModels(models)
+            }.onFailure { error ->
+                // Discovery failure preserves existing selection
+                _modelValidationMessage.value = "Failed to refresh models: ${error.localizedMessage ?: "Network error"}"
             }
             _isTestingConnection.value = false
         }
@@ -196,7 +222,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _testResult.value = null
             val result = visionAnalyzer.testConnection()
             _testResult.value = result
-            if (result is ConnectionTestResult.Success && result.models.isNotEmpty()) {
+            if (result is ConnectionTestResult.Success) {
                 handleDiscoveredModels(result.models)
             }
             _isTestingConnection.value = false

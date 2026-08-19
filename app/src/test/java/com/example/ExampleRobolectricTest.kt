@@ -137,24 +137,40 @@ class SettingsRepositoryTest {
     fun testDiscoveredModelsPersistence() {
         val models = listOf(
             com.example.ai.GeminiModel(
-                modelId = "gemini-2.5-flash",
-                name = "models/gemini-2.5-flash",
-                displayName = "Gemini 2.5 Flash",
-                description = "Fast multimodal",
+                name = "models/test-vision-pro",
+                displayName = "Test Vision Pro",
+                description = "Multimodal test model",
                 supportedGenerationMethods = listOf("generateContent"),
                 inputTokenLimit = 1048576,
-                outputTokenLimit = 8192
+                outputTokenLimit = 8192,
+                imageInputCapability = com.example.ai.ImageInputCapability.SUPPORTED
             )
         )
         repository.saveDiscoveredModels(models)
         val loaded = repository.loadDiscoveredModels()
         assertEquals(1, loaded.size)
-        assertEquals("gemini-2.5-flash", loaded[0].modelId)
-        assertEquals("Gemini 2.5 Flash", loaded[0].displayName)
+        assertEquals("test-vision-pro", loaded[0].modelId)
+        assertEquals("Test Vision Pro", loaded[0].displayName)
         assertEquals(1048576, loaded[0].inputTokenLimit)
+        assertEquals(com.example.ai.ImageInputCapability.SUPPORTED, loaded[0].imageInputCapability)
 
-        repository.saveSelectedModel("gemini-2.5-flash")
-        assertEquals("gemini-2.5-flash", repository.loadSelectedModel())
+        repository.saveSelectedModel("models/test-vision-pro")
+        assertEquals("test-vision-pro", repository.loadSelectedModel())
+
+        repository.clearSelectedModel()
+        assertEquals("", repository.loadSelectedModel())
+    }
+
+    @Test
+    fun testSelectedModelSavedNormalized() {
+        repository.saveSelectedModel("  models/my-custom-model  ")
+        assertEquals("my-custom-model", repository.loadSelectedModel())
+
+        repository.saveSelectedModel("my-custom-model-2")
+        assertEquals("my-custom-model-2", repository.loadSelectedModel())
+
+        repository.saveSelectedModel("")
+        assertEquals("", repository.loadSelectedModel())
     }
 }
 

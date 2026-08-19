@@ -90,12 +90,20 @@ class SettingsRepository(context: Context) {
     }
 
     fun loadSelectedModel(): String {
-        return prefs.getString(KEY_SELECTED_MODEL, "") ?: ""
+        return com.example.ai.normalizeModelId(prefs.getString(KEY_SELECTED_MODEL, ""))
     }
 
     fun saveSelectedModel(model: String) {
-        val cleanModel = model.trim().removePrefix("models/")
-        prefs.edit().putString(KEY_SELECTED_MODEL, cleanModel).apply()
+        val cleanModel = com.example.ai.normalizeModelId(model)
+        if (cleanModel.isBlank()) {
+            clearSelectedModel()
+        } else {
+            prefs.edit().putString(KEY_SELECTED_MODEL, cleanModel).apply()
+        }
+    }
+
+    fun clearSelectedModel() {
+        prefs.edit().remove(KEY_SELECTED_MODEL).apply()
     }
 
     fun loadDiscoveredModels(): List<GeminiModel> {
@@ -116,6 +124,12 @@ class SettingsRepository(context: Context) {
                 val outputLimit = if (obj.has("outputTokenLimit")) obj.optInt("outputTokenLimit") else null
                 val version = if (obj.has("version")) obj.optString("version", null) else null
                 val baseModelId = if (obj.has("baseModelId")) obj.optString("baseModelId", null) else null
+                val capabilityStr = obj.optString("imageInputCapability", "UNKNOWN")
+                val capability = try {
+                    com.example.ai.ImageInputCapability.valueOf(capabilityStr)
+                } catch (e: Exception) {
+                    com.example.ai.ImageInputCapability.UNKNOWN
+                }
 
                 list.add(
                     GeminiModel(
@@ -126,7 +140,8 @@ class SettingsRepository(context: Context) {
                         inputTokenLimit = inputLimit,
                         outputTokenLimit = outputLimit,
                         version = version,
-                        baseModelId = baseModelId
+                        baseModelId = baseModelId,
+                        imageInputCapability = capability
                     )
                 )
             }
@@ -150,6 +165,7 @@ class SettingsRepository(context: Context) {
                 m.outputTokenLimit?.let { put("outputTokenLimit", it) }
                 m.version?.let { put("version", it) }
                 m.baseModelId?.let { put("baseModelId", it) }
+                put("imageInputCapability", m.imageInputCapability.name)
             }
             jsonArray.put(obj)
         }

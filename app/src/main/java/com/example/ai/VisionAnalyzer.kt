@@ -17,6 +17,26 @@ enum class RateLimitState {
 }
 
 /**
+ * Image input capability state for Gemini models.
+ * UNKNOWN: Image input support has not been verified from authoritative API modality metadata.
+ * SUPPORTED: The model explicitly declares image input support in its API metadata.
+ *
+ * Models with UNKNOWN capability are ineligible for screen/image analysis to guarantee generation safety
+ * and avoid false assumptions based on naming heuristics.
+ */
+enum class ImageInputCapability {
+    UNKNOWN,
+    SUPPORTED
+}
+
+/**
+ * Normalizes Gemini model IDs by trimming whitespace and removing any leading "models/" prefix.
+ */
+fun normalizeModelId(raw: String?): String {
+    return raw?.trim()?.removePrefix("models/")?.trim().orEmpty()
+}
+
+/**
  * Representation of a Gemini model discovered dynamically via models.list API.
  */
 data class GeminiModel(
@@ -27,10 +47,11 @@ data class GeminiModel(
     val inputTokenLimit: Int? = null,
     val outputTokenLimit: Int? = null,
     val version: String? = null,
-    val baseModelId: String? = null
+    val baseModelId: String? = null,
+    val imageInputCapability: ImageInputCapability = ImageInputCapability.UNKNOWN
 ) {
     val modelId: String
-        get() = name.removePrefix("models/")
+        get() = normalizeModelId(name)
 }
 
 interface VisionAnalyzer {
