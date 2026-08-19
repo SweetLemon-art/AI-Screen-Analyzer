@@ -1,5 +1,6 @@
 package com.example
 
+import android.app.Application
 import android.content.Context
 import android.graphics.Bitmap
 import androidx.test.core.app.ApplicationProvider
@@ -7,9 +8,9 @@ import com.example.ai.AnalysisResult
 import com.example.ai.ConnectionTestResult
 import com.example.ai.GeminiModel
 import com.example.ai.GeminiVisionAnalyzer
-import com.example.ai.ImageInputCapability
 import com.example.ai.RateLimitState
 import com.example.ai.VisionAnalyzer
+import com.example.ai.normalizeModelId
 import com.example.capture.CaptureResult
 import com.example.capture.ScreenCaptureEngine
 import com.example.capture.ScreenCaptureProvider
@@ -59,7 +60,7 @@ import java.util.concurrent.atomic.AtomicInteger
 @Config(sdk = [34])
 class GeminiVisionAnalyzerQuotaAndModelTest {
 
-    private lateinit var context: Context
+    private lateinit var context: Application
     private lateinit var keyStore: GeminiApiKeyStore
     private lateinit var settingsRepository: SettingsRepository
 
@@ -67,8 +68,7 @@ class GeminiVisionAnalyzerQuotaAndModelTest {
         name = "models/test-vision-model",
         displayName = "Test Vision Model",
         description = "Multimodal test model",
-        supportedGenerationMethods = listOf("generateContent"),
-        imageInputCapability = ImageInputCapability.SUPPORTED
+        supportedGenerationMethods = listOf("generateContent")
     )
 
     @Before
@@ -87,7 +87,7 @@ class GeminiVisionAnalyzerQuotaAndModelTest {
             .build()
     }
 
-    // 1. 200 model discovery with modalities
+    // 1. 200 model discovery
     @Test
     fun test200ModelDiscovery() = runTest {
         keyStore.saveApiKey("test-key-12345")
@@ -95,11 +95,11 @@ class GeminiVisionAnalyzerQuotaAndModelTest {
             {
               "models": [
                 {
-                  "name": "models/gemini-2.5-flash",
+                  "name": "models/gemini-2.5-flash-001",
+                  "baseModelId": "gemini-2.5-flash",
                   "displayName": "Gemini 2.5 Flash",
                   "description": "Fast multimodal",
-                  "supportedGenerationMethods": ["generateContent", "countTokens"],
-                  "supportedInputModalities": ["TEXT", "IMAGE"]
+                  "supportedGenerationMethods": ["generateContent", "countTokens"]
                 },
                 {
                   "name": "models/embedding-001",
@@ -131,9 +131,8 @@ class GeminiVisionAnalyzerQuotaAndModelTest {
         assertTrue(result is ConnectionTestResult.Success)
         val success = result as ConnectionTestResult.Success
         assertEquals(2, success.models.size)
-        assertEquals("gemini-2.5-flash", success.models[0].modelId)
-        assertEquals(ImageInputCapability.SUPPORTED, success.models[0].imageInputCapability)
-        assertEquals(ImageInputCapability.UNKNOWN, success.models[1].imageInputCapability)
+        assertEquals("gemini-2.5-flash-001", success.models[0].modelId)
+        assertEquals("gemini-2.5-flash", success.models[0].canonicalModelId)
         assertEquals(RateLimitState.NORMAL, analyzer.rateLimitState.value)
     }
 
@@ -154,7 +153,7 @@ class GeminiVisionAnalyzerQuotaAndModelTest {
         val analyzer = GeminiVisionAnalyzer(keyStore, client = client)
         val testResult = analyzer.testConnection()
         assertTrue(testResult is ConnectionTestResult.Error)
-        assertEquals("API key is invalid.", (testResult as ConnectionTestResult.Error).message)
+        assertEquals("INVALID_API_KEY: API key is invalid.", (testResult as ConnectionTestResult.Error).message)
     }
 
     // 3. 403 Forbidden
@@ -174,7 +173,7 @@ class GeminiVisionAnalyzerQuotaAndModelTest {
         val analyzer = GeminiVisionAnalyzer(keyStore, client = client)
         val testResult = analyzer.testConnection()
         assertTrue(testResult is ConnectionTestResult.Error)
-        assertEquals("API key is unauthorized or permission denied.", (testResult as ConnectionTestResult.Error).message)
+        assertEquals("UNAUTHORIZED: API key is unauthorized or permission denied.", (testResult as ConnectionTestResult.Error).message)
     }
 
     // 4. 404 Model Not Found
@@ -194,7 +193,7 @@ class GeminiVisionAnalyzerQuotaAndModelTest {
         val analyzer = GeminiVisionAnalyzer(keyStore, client = client)
         val testResult = analyzer.testConnection()
         assertTrue(testResult is ConnectionTestResult.Error)
-        assertEquals("Gemini endpoint or model was not found.", (testResult as ConnectionTestResult.Error).message)
+        assertEquals("MODEL_NOT_FOUND: Gemini endpoint or model was not found.", (testResult as ConnectionTestResult.Error).message)
     }
 
     // 5. 429 Rate Limit
@@ -214,7 +213,7 @@ class GeminiVisionAnalyzerQuotaAndModelTest {
         val analyzer = GeminiVisionAnalyzer(keyStore, client = client)
         val testResult = analyzer.testConnection()
         assertTrue(testResult is ConnectionTestResult.Error)
-        assertEquals("Gemini API rate limit reached.", (testResult as ConnectionTestResult.Error).message)
+        assertEquals("RATE_LIMITED: Gemini API rate limit reached.", (testResult as ConnectionTestResult.Error).message)
         assertEquals(RateLimitState.RATE_LIMITED, analyzer.rateLimitState.value)
     }
 
@@ -290,7 +289,6 @@ class GeminiVisionAnalyzerQuotaAndModelTest {
                   "displayName": "Model Page 1",
                   "description": "Page 1 Model",
                   "supportedGenerationMethods": ["generateContent"],
-                  "supportedInputModalities": ["TEXT", "IMAGE"],
                   "inputTokenLimit": 1048576,
                   "outputTokenLimit": 8192
                 }
@@ -306,8 +304,7 @@ class GeminiVisionAnalyzerQuotaAndModelTest {
                   "name": "models/model-p2",
                   "displayName": "Model Page 2",
                   "description": "Page 2 Model",
-                  "supportedGenerationMethods": ["generateContent"],
-                  "inputModalities": ["IMAGE"]
+                  "supportedGenerationMethods": ["generateContent"]
                 }
               ]
             }
@@ -334,9 +331,7 @@ class GeminiVisionAnalyzerQuotaAndModelTest {
         assertEquals(2, models.size)
         assertEquals("model-p1", models[0].modelId)
         assertEquals(1048576, models[0].inputTokenLimit)
-        assertEquals(ImageInputCapability.SUPPORTED, models[0].imageInputCapability)
         assertEquals("model-p2", models[1].modelId)
-        assertEquals(ImageInputCapability.SUPPORTED, models[1].imageInputCapability)
         assertEquals(2, requestedUrls.size)
     }
 
@@ -378,58 +373,59 @@ class GeminiVisionAnalyzerQuotaAndModelTest {
     }
 
     // ==========================================
-    // CAPABILITY TESTS (Prompt Requirement 12)
+    // CANONICAL MODEL ID & NORMALIZATION TESTS
     // ==========================================
 
     @Test
-    fun testGenerateContentModelWithReliablySupportedImageCapability() {
-        val json = """
-            {
-              "models": [
-                {
-                  "name": "models/vision-supported-model",
-                  "displayName": "Vision Supported Model",
-                  "supportedGenerationMethods": ["generateContent"],
-                  "supportedInputModalities": ["TEXT", "IMAGE"]
-                }
-              ]
-            }
-        """.trimIndent()
-
-        val analyzer = GeminiVisionAnalyzer(keyStore)
-        val page = analyzer.parseModelsPage(json)
-        assertEquals(1, page.models.size)
-        assertEquals(ImageInputCapability.SUPPORTED, page.models[0].imageInputCapability)
+    fun testNormalizeModelIdFunction() {
+        assertEquals("gemini-1.5-flash", normalizeModelId("models/gemini-1.5-flash"))
+        assertEquals("gemini-1.5-flash", normalizeModelId("gemini-1.5-flash"))
+        assertEquals("gemini-1.5-flash", normalizeModelId("  models/gemini-1.5-flash  "))
+        assertEquals("gemini-1.5-flash", normalizeModelId("models/models/gemini-1.5-flash"))
+        assertEquals("", normalizeModelId(""))
+        assertEquals("", normalizeModelId("   "))
+        assertEquals("", normalizeModelId(null))
     }
 
     @Test
-    fun testGenerateContentModelWithUnknownImageCapability() {
+    fun testCanonicalModelIdPrefersBaseModelId() {
+        val model = GeminiModel(
+            name = "models/gemini-1.5-flash-001",
+            displayName = "Gemini 1.5 Flash 001",
+            description = "Fast model",
+            supportedGenerationMethods = listOf("generateContent"),
+            baseModelId = "models/gemini-1.5-flash"
+        )
+        assertEquals("gemini-1.5-flash-001", model.modelId)
+        assertEquals("gemini-1.5-flash", model.canonicalModelId)
+    }
+
+    @Test
+    fun testCanonicalModelIdFallsBackToNormalizedModelId() {
+        val model = GeminiModel(
+            name = "models/gemini-pro",
+            displayName = "Gemini Pro",
+            description = "Pro model",
+            supportedGenerationMethods = listOf("generateContent"),
+            baseModelId = null
+        )
+        assertEquals("gemini-pro", model.modelId)
+        assertEquals("gemini-pro", model.canonicalModelId)
+    }
+
+    @Test
+    fun testCompatibilityFilteringRequiresGenerateContent() {
         val json = """
             {
               "models": [
                 {
-                  "name": "models/text-only-model",
-                  "displayName": "Text Only Model",
+                  "name": "models/gemini-flash",
+                  "displayName": "Gemini Flash",
                   "supportedGenerationMethods": ["generateContent"]
-                }
-              ]
-            }
-        """.trimIndent()
-
-        val analyzer = GeminiVisionAnalyzer(keyStore)
-        val page = analyzer.parseModelsPage(json)
-        assertEquals(1, page.models.size)
-        assertEquals(ImageInputCapability.UNKNOWN, page.models[0].imageInputCapability)
-    }
-
-    @Test
-    fun testIncompatibleModelWithoutGenerateContent() {
-        val json = """
-            {
-              "models": [
+                },
                 {
-                  "name": "models/embedding-model",
-                  "displayName": "Embedding Model",
+                  "name": "models/embedding-001",
+                  "displayName": "Embedding 001",
                   "supportedGenerationMethods": ["embedContent"]
                 }
               ]
@@ -438,101 +434,15 @@ class GeminiVisionAnalyzerQuotaAndModelTest {
 
         val analyzer = GeminiVisionAnalyzer(keyStore)
         val page = analyzer.parseModelsPage(json)
-        assertEquals(1, page.models.size)
-        assertFalse(page.models[0].supportedGenerationMethods.contains("generateContent"))
-    }
-
-    @Test
-    fun testUnknownCapabilityRejectedForImageAnalysis() = runTest {
-        keyStore.saveApiKey("test-key")
-        val unknownCapabilityModel = GeminiModel(
-            name = "models/unknown-capability-model",
-            displayName = "Unknown Model",
-            description = "No verified image capability",
-            supportedGenerationMethods = listOf("generateContent"),
-            imageInputCapability = ImageInputCapability.UNKNOWN
-        )
-
-        var networkCalls = 0
-        val client = createClient { chain ->
-            networkCalls++
-            Response.Builder()
-                .request(chain.request())
-                .protocol(Protocol.HTTP_1_1)
-                .code(200)
-                .message("OK")
-                .body("{}".toResponseBody("application/json".toMediaType()))
-                .build()
-        }
-
-        val analyzer = GeminiVisionAnalyzer(
-            apiKeyStore = keyStore,
-            modelProvider = { "unknown-capability-model" },
-            compatibleModelsProvider = { listOf(unknownCapabilityModel) },
-            client = client
-        )
-
-        val bitmap = Bitmap.createBitmap(10, 10, Bitmap.Config.ARGB_8888)
-        val result = analyzer.analyze(bitmap, AnalysisContext.DEFAULT, CaptureSettings.DEFAULT)
-
-        assertFalse(result.isSuccess)
-        assertEquals("MODEL_NOT_IMAGE_CAPABLE", result.summary)
-        assertTrue(result.errorMessage!!.contains("MODEL_NOT_IMAGE_CAPABLE"))
-        assertEquals("Network request must NOT be sent for unverified image capability", 0, networkCalls)
-    }
-
-    @Test
-    fun testModelNamePrefixDoesNotImplyImageCapability() {
-        val json = """
-            {
-              "models": [
-                {
-                  "name": "models/gemini-2.5-flash",
-                  "displayName": "Gemini 2.5 Flash",
-                  "supportedGenerationMethods": ["generateContent"]
-                },
-                {
-                  "name": "models/gemini-ultra-vision-pro",
-                  "displayName": "Gemini Ultra Vision Pro",
-                  "supportedGenerationMethods": ["generateContent"]
-                }
-              ]
-            }
-        """.trimIndent()
-
-        val analyzer = GeminiVisionAnalyzer(keyStore)
-        val page = analyzer.parseModelsPage(json)
         assertEquals(2, page.models.size)
-        // Without explicit modality in API response, both must be UNKNOWN — prefix heuristics are strictly forbidden
-        assertEquals(ImageInputCapability.UNKNOWN, page.models[0].imageInputCapability)
-        assertEquals(ImageInputCapability.UNKNOWN, page.models[1].imageInputCapability)
-    }
 
-    @Test
-    fun testNoFakeCapabilityFieldsAssumed() {
-        val json = """
-            {
-              "models": [
-                {
-                  "name": "models/model-with-fake-fields",
-                  "displayName": "Model With Fake Fields",
-                  "supportedGenerationMethods": ["generateContent"],
-                  "isVisionCapable": true,
-                  "supportsImages": true
-                }
-              ]
-            }
-        """.trimIndent()
-
-        val analyzer = GeminiVisionAnalyzer(keyStore)
-        val page = analyzer.parseModelsPage(json)
-        assertEquals(1, page.models.size)
-        // Fake unstandardized fields are ignored; without genuine API modality array it remains UNKNOWN
-        assertEquals(ImageInputCapability.UNKNOWN, page.models[0].imageInputCapability)
+        val compatible = page.models.filter { it.supportedGenerationMethods.contains("generateContent") }
+        assertEquals(1, compatible.size)
+        assertEquals("gemini-flash", compatible[0].canonicalModelId)
     }
 
     // ==========================================
-    // GENERATION GUARD TESTS (Prompt Requirement 14)
+    // GENERATION GUARD TESTS
     // ==========================================
 
     @Test
@@ -602,8 +512,7 @@ class GeminiVisionAnalyzerQuotaAndModelTest {
             name = "models/text-only",
             displayName = "Text Only",
             description = "No generateContent",
-            supportedGenerationMethods = listOf("embedContent"),
-            imageInputCapability = ImageInputCapability.SUPPORTED
+            supportedGenerationMethods = listOf("embedContent")
         )
 
         var networkCalls = 0
@@ -631,6 +540,84 @@ class GeminiVisionAnalyzerQuotaAndModelTest {
         assertFalse(result.isSuccess)
         assertEquals("MODEL_NOT_AVAILABLE", result.summary)
         assertEquals(0, networkCalls)
+    }
+
+    @Test
+    fun testCanonicalModelIdUsedForGenerateContentUrl() = runTest {
+        keyStore.saveApiKey("test-key")
+        var requestedUrl: String? = null
+
+        val client = createClient { chain ->
+            val req = chain.request()
+            requestedUrl = req.url.toString()
+            Response.Builder()
+                .request(req)
+                .protocol(Protocol.HTTP_1_1)
+                .code(200)
+                .message("OK")
+                .body("""
+                    {
+                      "candidates": [
+                        {
+                          "content": {
+                            "parts": [{"text": "{\"summary\":\"Output\",\"observations\":[],\"conclusion\":\"OK\"}"}]
+                          }
+                        }
+                      ]
+                    }
+                """.trimIndent().toResponseBody("application/json".toMediaType()))
+                .build()
+        }
+
+        val model = GeminiModel(
+            name = "models/gemini-1.5-flash-001",
+            displayName = "Flash 001",
+            description = "Flash",
+            supportedGenerationMethods = listOf("generateContent"),
+            baseModelId = "gemini-1.5-flash"
+        )
+
+        val analyzer = GeminiVisionAnalyzer(
+            apiKeyStore = keyStore,
+            modelProvider = { "gemini-1.5-flash" },
+            compatibleModelsProvider = { listOf(model) },
+            client = client
+        )
+
+        val bitmap = Bitmap.createBitmap(10, 10, Bitmap.Config.ARGB_8888)
+        val result = analyzer.analyze(bitmap, AnalysisContext.DEFAULT, CaptureSettings.DEFAULT)
+
+        assertTrue(result.isSuccess)
+        assertNotNull(requestedUrl)
+        assertTrue(requestedUrl!!.endsWith("/v1beta/models/gemini-1.5-flash:generateContent"))
+    }
+
+    @Test
+    fun test404ModelNotFoundDuringAnalyze() = runTest {
+        keyStore.saveApiKey("test-key")
+        val client = createClient { chain ->
+            Response.Builder()
+                .request(chain.request())
+                .protocol(Protocol.HTTP_1_1)
+                .code(404)
+                .message("Not Found")
+                .body("""{"error":{"message":"Model not found"}}""".toResponseBody("application/json".toMediaType()))
+                .build()
+        }
+
+        val analyzer = GeminiVisionAnalyzer(
+            apiKeyStore = keyStore,
+            modelProvider = { "test-vision-model" },
+            compatibleModelsProvider = { listOf(supportedVisionModel) },
+            client = client
+        )
+
+        val bitmap = Bitmap.createBitmap(10, 10, Bitmap.Config.ARGB_8888)
+        val result = analyzer.analyze(bitmap, AnalysisContext.DEFAULT, CaptureSettings.DEFAULT)
+
+        assertFalse(result.isSuccess)
+        assertEquals("MODEL_NOT_FOUND", result.summary)
+        assertTrue(result.errorMessage!!.contains("MODEL_NOT_FOUND"))
     }
 
     // ==========================================
@@ -768,7 +755,7 @@ class GeminiVisionAnalyzerQuotaAndModelTest {
         val result = analyzer.analyze(bitmap, AnalysisContext.DEFAULT, CaptureSettings.DEFAULT)
 
         assertFalse(result.isSuccess)
-        assertTrue(result.errorMessage!!.contains("Gemini"))
+        assertTrue(result.errorMessage!!.contains("RATE_LIMITED"))
         assertEquals(4, requestCount)
     }
 
@@ -846,33 +833,34 @@ class GeminiVisionAnalyzerQuotaAndModelTest {
         val testDispatcher = StandardTestDispatcher(testScheduler)
         val testScope = TestScope(testDispatcher)
 
-        val client = createClient { chain ->
-            Response.Builder()
-                .request(chain.request())
-                .protocol(Protocol.HTTP_1_1)
-                .code(429)
-                .message("Too Many Requests")
-                .header("Retry-After", "1")
-                .body("""{"error":{"message":"RESOURCE_EXHAUSTED"}}""".toResponseBody("application/json".toMediaType()))
-                .build()
+        val fakeRateLimitedAnalyzer = object : VisionAnalyzer {
+            override val rateLimitState = MutableStateFlow(RateLimitState.RATE_LIMITED).asStateFlow()
+            override suspend fun analyze(bitmap: Bitmap, context: AnalysisContext, settings: CaptureSettings): AnalysisResult {
+                return AnalysisResult(
+                    contextName = context.name,
+                    summary = "RATE_LIMITED",
+                    observations = listOf("Gemini API rate limit reached."),
+                    conclusion = "Wait for rate limit window.",
+                    rawResponse = "",
+                    isSuccess = false,
+                    errorMessage = "RATE_LIMITED: Gemini API rate limit reached.",
+                    processingDurationMs = 10L
+                )
+            }
+            override suspend fun testConnection(): ConnectionTestResult = ConnectionTestResult.Error("RATE_LIMITED")
+            override suspend fun discoverModels(): Result<List<GeminiModel>> = Result.success(emptyList())
         }
 
-        val analyzer = GeminiVisionAnalyzer(
-            apiKeyStore = keyStore,
-            modelProvider = { "test-vision-model" },
-            compatibleModelsProvider = { listOf(supportedVisionModel) },
-            client = client
-        )
         val fakeCapture = object : ScreenCaptureProvider {
             override val isReady: StateFlow<Boolean> = MutableStateFlow(true).asStateFlow()
             override suspend fun captureSingleFrame(): CaptureResult =
                 CaptureResult.Success(Bitmap.createBitmap(10, 10, Bitmap.Config.ARGB_8888))
         }
 
-        val controller = MonitoringController(analyzer, testScope, fakeCapture)
+        val controller = MonitoringController(fakeRateLimitedAnalyzer, testScope, fakeCapture)
 
         controller.startMonitoring({ AnalysisContext.DEFAULT }, { CaptureSettings.DEFAULT })
-        advanceTimeBy(5000)
+        advanceTimeBy(100)
 
         assertNotNull(controller.latestResult.value)
         assertFalse(controller.latestResult.value!!.isSuccess)
@@ -950,8 +938,7 @@ class GeminiVisionAnalyzerQuotaAndModelTest {
             name = "models/custom-model",
             displayName = "Custom Model",
             description = "Custom",
-            supportedGenerationMethods = listOf("generateContent"),
-            imageInputCapability = ImageInputCapability.SUPPORTED
+            supportedGenerationMethods = listOf("generateContent")
         )
 
         val analyzer = GeminiVisionAnalyzer(
@@ -970,7 +957,7 @@ class GeminiVisionAnalyzerQuotaAndModelTest {
     }
 
     // ==========================================
-    // MODEL VALIDATION & VIEWMODEL TESTS (Prompt Requirement 13)
+    // MODEL VALIDATION & VIEWMODEL TESTS
     // ==========================================
 
     @Test
@@ -980,8 +967,7 @@ class GeminiVisionAnalyzerQuotaAndModelTest {
             name = "models/active-vision-model",
             displayName = "Active Vision Model",
             description = "Active",
-            supportedGenerationMethods = listOf("generateContent"),
-            imageInputCapability = ImageInputCapability.SUPPORTED
+            supportedGenerationMethods = listOf("generateContent")
         )
 
         viewModel.selectModel("active-vision-model")
@@ -991,6 +977,51 @@ class GeminiVisionAnalyzerQuotaAndModelTest {
 
         assertEquals("active-vision-model", viewModel.selectedModel.value)
         assertNull(viewModel.modelValidationMessage.value)
+    }
+
+    @Test
+    fun testSelectedModelMatchingBaseModelIdPreserved() {
+        val viewModel = MainViewModel(context)
+        settingsRepository.saveSelectedModel("gemini-flash")
+
+        val freshModel = GeminiModel(
+            name = "models/gemini-flash-001",
+            displayName = "Gemini Flash",
+            description = "Flash",
+            supportedGenerationMethods = listOf("generateContent"),
+            baseModelId = "gemini-flash"
+        )
+
+        viewModel.handleDiscoveredModels(listOf(freshModel))
+
+        assertEquals("gemini-flash", viewModel.selectedModel.value)
+        assertEquals("gemini-flash", settingsRepository.loadSelectedModel())
+        assertNull(viewModel.modelValidationMessage.value)
+    }
+
+    @Test
+    fun testDeduplicationByCanonicalModelId() {
+        val viewModel = MainViewModel(context)
+        val modelA = GeminiModel(
+            name = "models/gemini-1.5-flash-001",
+            displayName = "Gemini 1.5 Flash 001",
+            description = "Flash v1",
+            supportedGenerationMethods = listOf("generateContent"),
+            baseModelId = "gemini-1.5-flash"
+        )
+        val modelB = GeminiModel(
+            name = "models/gemini-1.5-flash-latest",
+            displayName = "Gemini 1.5 Flash Latest",
+            description = "Flash latest",
+            supportedGenerationMethods = listOf("generateContent"),
+            baseModelId = "gemini-1.5-flash"
+        )
+
+        viewModel.handleDiscoveredModels(listOf(modelA, modelB))
+
+        // Should be deduplicated to 1 entry
+        assertEquals(1, viewModel.discoveredModels.value.size)
+        assertEquals("gemini-1.5-flash", viewModel.discoveredModels.value[0].canonicalModelId)
     }
 
     @Test
@@ -1004,8 +1035,7 @@ class GeminiVisionAnalyzerQuotaAndModelTest {
                 name = "models/new-vision-model",
                 displayName = "New Vision Model",
                 description = "New",
-                supportedGenerationMethods = listOf("generateContent"),
-                imageInputCapability = ImageInputCapability.SUPPORTED
+                supportedGenerationMethods = listOf("generateContent")
             )
         )
 
@@ -1060,8 +1090,7 @@ class GeminiVisionAnalyzerQuotaAndModelTest {
                 name = "models/gemini-flash",
                 displayName = "Gemini Flash",
                 description = "Flash",
-                supportedGenerationMethods = listOf("generateContent"),
-                imageInputCapability = ImageInputCapability.SUPPORTED
+                supportedGenerationMethods = listOf("generateContent")
             )
         )
 
@@ -1078,8 +1107,7 @@ class GeminiVisionAnalyzerQuotaAndModelTest {
             name = "models/stale-model",
             displayName = "Stale Model",
             description = "Stale",
-            supportedGenerationMethods = listOf("generateContent"),
-            imageInputCapability = ImageInputCapability.SUPPORTED
+            supportedGenerationMethods = listOf("generateContent")
         )
         settingsRepository.saveDiscoveredModels(listOf(staleModel))
         settingsRepository.saveSelectedModel("stale-model")
@@ -1093,8 +1121,7 @@ class GeminiVisionAnalyzerQuotaAndModelTest {
                 name = "models/fresh-model",
                 displayName = "Fresh Model",
                 description = "Fresh",
-                supportedGenerationMethods = listOf("generateContent"),
-                imageInputCapability = ImageInputCapability.SUPPORTED
+                supportedGenerationMethods = listOf("generateContent")
             )
         )
 

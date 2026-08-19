@@ -100,7 +100,11 @@ class GeminiVisionAnalyzer(
 
         // Generation safety guard: Validate against latest compatible models list
         val compatibleList = compatibleModelsProvider()
-        val matchingModel = compatibleList.find { normalizeModelId(it.name) == selectedModelId }
+        val matchingModel = compatibleList.find {
+            it.canonicalModelId == selectedModelId ||
+            it.modelId == selectedModelId ||
+            normalizeModelId(it.name) == selectedModelId
+        }
 
         if (matchingModel == null) {
             val duration = System.currentTimeMillis() - startTime
@@ -135,22 +139,7 @@ class GeminiVisionAnalyzer(
             )
         }
 
-        if (matchingModel.imageInputCapability != ImageInputCapability.SUPPORTED) {
-            val duration = System.currentTimeMillis() - startTime
-            return@withContext AnalysisResult(
-                contextName = context.name,
-                summary = "MODEL_NOT_IMAGE_CAPABLE",
-                observations = listOf(
-                    "Selected model '$selectedModelId' has not been verified to support image input.",
-                    "Image capability state is UNKNOWN or unsupported."
-                ),
-                conclusion = "Model cannot be used for visual screen analysis.",
-                rawResponse = "",
-                isSuccess = false,
-                errorMessage = "MODEL_NOT_IMAGE_CAPABLE: Selected model '$selectedModelId' does not support image input.",
-                processingDurationMs = duration
-            )
-        }
+        val canonicalModelIdToUse = matchingModel.canonicalModelId
 
         try {
             // Process and encode image to Base64 (temporary scaled bitmaps are recycled inside processForGeminiBase64)
@@ -233,7 +222,7 @@ class GeminiVisionAnalyzer(
 
             while (attempt <= maxRetries) {
                 val request = Request.Builder()
-                    .url(getGenerateContentUrl(selectedModelId))
+                    .url(getGenerateContentUrl(canonicalModelIdToUse))
                     .addHeader("x-goog-api-key", apiKey)
                     .post(requestBody)
                     .build()
@@ -267,6 +256,21 @@ class GeminiVisionAnalyzer(
                     )
                 }
 
+                // Handle HTTP 404 Model Not Found
+                if (statusCode == 404) {
+                    val duration = System.currentTimeMillis() - startTime
+                    return@withContext AnalysisResult(
+                        contextName = context.name,
+                        summary = "MODEL_NOT_FOUND",
+                        observations = listOf("Gemini endpoint or model was not found (404)."),
+                        conclusion = "Selected model '$canonicalModelIdToUse' is not found. Please choose another model in Settings.",
+                        rawResponse = "",
+                        isSuccess = false,
+                        errorMessage = "MODEL_NOT_FOUND: Gemini endpoint or model was not found.",
+                        processingDurationMs = duration
+                    )
+                }
+
                 // Handle HTTP 429 Rate-limit with bounded backoff
                 if (statusCode == 429) {
                     _rateLimitState.value = RateLimitState.RATE_LIMITED
@@ -281,11 +285,11 @@ class GeminiVisionAnalyzer(
                     } else {
                         // Max retries exceeded
                         val duration = System.currentTimeMillis() - startTime
-                        val userErrorMessage = "Gemini API rate limit reached."
+                        val userErrorMessage = "RATE_LIMITED: Gemini API rate limit reached."
                         return@withContext AnalysisResult(
                             contextName = context.name,
-                            summary = "Rate limit reached (429)",
-                            observations = listOf(userErrorMessage),
+                            summary = "RATE_LIMITED",
+                            observations = listOf("Gemini API rate limit reached."),
                             conclusion = "Wait for rate limit window or increase delay in Settings.",
                             rawResponse = "",
                             isSuccess = false,
@@ -295,13 +299,18 @@ class GeminiVisionAnalyzer(
                     }
                 }
 
-                // Non-429 error response (e.g. 401, 403, 404, 5xx)
+                // Non-429 error response (e.g. 401, 403, 5xx)
                 val duration = System.currentTimeMillis() - startTime
                 val userErrorMessage = sanitizeHttpError(statusCode, responseBodyString)
+                val summaryCode = when (statusCode) {
+                    401 -> "INVALID_API_KEY"
+                    403 -> "UNAUTHORIZED"
+                    else -> "Analysis request failed ($statusCode)"
+                }
 
                 return@withContext AnalysisResult(
                     contextName = context.name,
-                    summary = "Analysis request failed ($statusCode)",
+                    summary = summaryCode,
                     observations = listOf(userErrorMessage),
                     conclusion = "Check your API key, model selection, and network connectivity.",
                     rawResponse = "",
@@ -496,26 +505,6 @@ class GeminiVisionAnalyzer(
                 }
             }
 
-            // Image input capability strategy (No guessing / No heuristics):
-            // We inspect only actual input modality metadata returned by the API endpoint.
-            // If the API returns supportedInputModalities or inputModalities containing "IMAGE",
-            // we mark it as SUPPORTED. Otherwise, it remains UNKNOWN.
-            // Model names, prefixes, or generateContent alone do NOT imply image capability.
-            val modalitiesArray = modelObj.optJSONArray("supportedInputModalities")
-                ?: modelObj.optJSONArray("inputModalities")
-                ?: modelObj.optJSONArray("supportedModalities")
-
-            var capability = ImageInputCapability.UNKNOWN
-            if (modalitiesArray != null) {
-                for (j in 0 until modalitiesArray.length()) {
-                    val modality = modalitiesArray.optString(j, "").trim().uppercase()
-                    if (modality == "IMAGE" || modality == "IMAGE/JPEG" || modality == "IMAGE/PNG" || modality == "IMAGE/WEBP" || modality == "MODALITY_IMAGE") {
-                        capability = ImageInputCapability.SUPPORTED
-                        break
-                    }
-                }
-            }
-
             val inputTokenLimit = if (modelObj.has("inputTokenLimit")) modelObj.optInt("inputTokenLimit") else null
             val outputTokenLimit = if (modelObj.has("outputTokenLimit")) modelObj.optInt("outputTokenLimit") else null
             val version = if (modelObj.has("version")) modelObj.optString("version", null) else null
@@ -530,8 +519,7 @@ class GeminiVisionAnalyzer(
                     inputTokenLimit = inputTokenLimit,
                     outputTokenLimit = outputTokenLimit,
                     version = version,
-                    baseModelId = baseModelId,
-                    imageInputCapability = capability
+                    baseModelId = baseModelId
                 )
             )
         }
@@ -547,11 +535,11 @@ class GeminiVisionAnalyzer(
     private fun sanitizeHttpError(statusCode: Int, responseBody: String): String {
         return when (statusCode) {
             400 -> "Invalid request parameters."
-            401 -> "API key is invalid."
-            403 -> "API key is unauthorized or permission denied."
-            404 -> "Gemini endpoint or model was not found."
+            401 -> "INVALID_API_KEY: API key is invalid."
+            403 -> "UNAUTHORIZED: API key is unauthorized or permission denied."
+            404 -> "MODEL_NOT_FOUND: Gemini endpoint or model was not found."
             408 -> "Request timeout from server. Please try again."
-            429 -> "Gemini API rate limit reached."
+            429 -> "RATE_LIMITED: Gemini API rate limit reached."
             in 500..599 -> "Gemini service temporarily unavailable."
             else -> "HTTP $statusCode: Unexpected API error."
         }

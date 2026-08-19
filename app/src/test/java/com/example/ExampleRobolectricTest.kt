@@ -137,22 +137,22 @@ class SettingsRepositoryTest {
     fun testDiscoveredModelsPersistence() {
         val models = listOf(
             com.example.ai.GeminiModel(
-                name = "models/test-vision-pro",
+                name = "models/test-vision-pro-001",
                 displayName = "Test Vision Pro",
                 description = "Multimodal test model",
                 supportedGenerationMethods = listOf("generateContent"),
                 inputTokenLimit = 1048576,
                 outputTokenLimit = 8192,
-                imageInputCapability = com.example.ai.ImageInputCapability.SUPPORTED
+                baseModelId = "test-vision-pro"
             )
         )
         repository.saveDiscoveredModels(models)
         val loaded = repository.loadDiscoveredModels()
         assertEquals(1, loaded.size)
-        assertEquals("test-vision-pro", loaded[0].modelId)
+        assertEquals("test-vision-pro-001", loaded[0].modelId)
+        assertEquals("test-vision-pro", loaded[0].canonicalModelId)
         assertEquals("Test Vision Pro", loaded[0].displayName)
         assertEquals(1048576, loaded[0].inputTokenLimit)
-        assertEquals(com.example.ai.ImageInputCapability.SUPPORTED, loaded[0].imageInputCapability)
 
         repository.saveSelectedModel("models/test-vision-pro")
         assertEquals("test-vision-pro", repository.loadSelectedModel())

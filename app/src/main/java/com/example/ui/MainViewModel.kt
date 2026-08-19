@@ -100,8 +100,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun selectModel(modelId: String) {
         val cleanModel = com.example.ai.normalizeModelId(modelId)
-        _selectedModel.value = cleanModel
-        settingsRepository.saveSelectedModel(cleanModel)
+        val matched = _discoveredModels.value.find {
+            it.canonicalModelId == cleanModel ||
+            it.modelId == cleanModel ||
+            com.example.ai.normalizeModelId(it.name) == cleanModel
+        }
+        val canonicalToSave = matched?.canonicalModelId ?: cleanModel
+        _selectedModel.value = canonicalToSave
+        settingsRepository.saveSelectedModel(canonicalToSave)
         _modelValidationMessage.value = null
     }
 
@@ -111,30 +117,36 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun handleDiscoveredModels(freshModels: List<GeminiModel>) {
-        // Filter compatible models: Must support generateContent AND have ImageInputCapability.SUPPORTED
-        val compatibleModels = freshModels.filter {
-            it.supportedGenerationMethods.contains("generateContent") &&
-            it.imageInputCapability == com.example.ai.ImageInputCapability.SUPPORTED
-        }
+        // Filter compatible models: Must support generateContent
+        // Distinct by canonicalModelId for stable deduplication
+        val compatibleModels = freshModels
+            .filter { it.supportedGenerationMethods.contains("generateContent") }
+            .distinctBy { it.canonicalModelId }
 
         _discoveredModels.value = compatibleModels
         settingsRepository.saveDiscoveredModels(compatibleModels)
 
         if (compatibleModels.isEmpty()) {
             clearSelectedModel()
-            _modelValidationMessage.value = "NO_COMPATIBLE_MODELS: No compatible vision models discovered."
+            _modelValidationMessage.value = "NO_COMPATIBLE_MODELS: No compatible models discovered."
             return
         }
 
         // Fresh discovery validation against persisted selection
         val persistedSelected = settingsRepository.loadSelectedModel()
         if (persistedSelected.isNotBlank()) {
-            val modelStillExists = compatibleModels.any { it.modelId == persistedSelected }
-            if (modelStillExists) {
-                _selectedModel.value = persistedSelected
+            val matchingModel = compatibleModels.find {
+                it.canonicalModelId == persistedSelected ||
+                it.modelId == persistedSelected ||
+                com.example.ai.normalizeModelId(it.name) == persistedSelected
+            }
+            if (matchingModel != null) {
+                val canonical = matchingModel.canonicalModelId
+                _selectedModel.value = canonical
+                settingsRepository.saveSelectedModel(canonical)
                 _modelValidationMessage.value = null
             } else {
-                // Stale selection is cleared immediately
+                // Stale selection is cleared immediately without fallback auto-selection
                 clearSelectedModel()
                 _modelValidationMessage.value = "MODEL_NOT_AVAILABLE: Selected model '$persistedSelected' is no longer available."
             }

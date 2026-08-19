@@ -604,11 +604,11 @@ fun SettingsScreen(
                     }
                 } else {
                     discoveredModels.forEach { model ->
-                        val isSelected = selectedModel == model.modelId || selectedModel == model.name
+                        val isSelected = selectedModel == model.canonicalModelId || selectedModel == model.modelId || selectedModel == model.name
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .testTag("model_option_${model.modelId}")
+                                .testTag("model_option_${model.canonicalModelId}")
                                 .clip(RoundedCornerShape(12.dp))
                                 .background(if (isSelected) Slate800 else Color.Transparent)
                                 .border(
@@ -617,7 +617,7 @@ fun SettingsScreen(
                                     RoundedCornerShape(12.dp)
                                 )
                                 .clickable {
-                                    viewModel.selectModel(model.modelId)
+                                    viewModel.selectModel(model.canonicalModelId)
                                 }
                                 .padding(14.dp),
                             verticalAlignment = Alignment.CenterVertically,
