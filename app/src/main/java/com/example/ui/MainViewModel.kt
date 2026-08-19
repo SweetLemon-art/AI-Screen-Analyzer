@@ -90,6 +90,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _currentRoute = MutableStateFlow(ScreenRoute.HOME)
     val currentRoute: StateFlow<ScreenRoute> = _currentRoute.asStateFlow()
 
+    init {
+        viewModelScope.launch {
+            controller.latestResult.collect { result ->
+                if (result != null && !result.isSuccess) {
+                    if (result.summary == "MODEL_NOT_FOUND" || result.errorMessage?.contains("MODEL_NOT_FOUND") == true) {
+                        clearSelectedModel()
+                        _modelValidationMessage.value = "MODEL_NOT_FOUND: Selected model is not found on server."
+                    }
+                }
+            }
+        }
+    }
+
     fun navigateTo(route: ScreenRoute) {
         _currentRoute.value = route
     }
@@ -100,6 +113,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun selectModel(modelId: String) {
         val cleanModel = com.example.ai.normalizeModelId(modelId)
+        if (cleanModel.isBlank()) {
+            clearSelectedModel()
+            return
+        }
         val matched = _discoveredModels.value.find {
             it.canonicalModelId == cleanModel ||
             it.modelId == cleanModel ||
@@ -118,10 +135,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun handleDiscoveredModels(freshModels: List<GeminiModel>) {
         // Filter compatible models: Must support generateContent
-        // Distinct by canonicalModelId for stable deduplication
+        // Deduplicate by canonicalModelId: prefer exact base model entry if available, else first stable entry
         val compatibleModels = freshModels
             .filter { it.supportedGenerationMethods.contains("generateContent") }
-            .distinctBy { it.canonicalModelId }
+            .groupBy { it.canonicalModelId }
+            .values
+            .map { group ->
+                group.find { it.modelId == it.canonicalModelId } ?: group.first()
+            }
 
         _discoveredModels.value = compatibleModels
         settingsRepository.saveDiscoveredModels(compatibleModels)

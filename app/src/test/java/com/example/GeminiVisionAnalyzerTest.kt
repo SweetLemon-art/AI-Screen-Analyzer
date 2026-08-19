@@ -441,6 +441,36 @@ class GeminiVisionAnalyzerQuotaAndModelTest {
         assertEquals("gemini-flash", compatible[0].canonicalModelId)
     }
 
+    @Test
+    fun testParseModelsPageMalformedJsonThrows() {
+        val analyzer = GeminiVisionAnalyzer(keyStore)
+        try {
+            analyzer.parseModelsPage("invalid-json{}}")
+            org.junit.Assert.fail("Expected IllegalArgumentException")
+        } catch (e: IllegalArgumentException) {
+            assertTrue(e.message!!.contains("MALFORMED_MODEL_RESPONSE"))
+        }
+    }
+
+    @Test
+    fun testParseModelsPageMissingModelsPropertyThrows() {
+        val analyzer = GeminiVisionAnalyzer(keyStore)
+        try {
+            analyzer.parseModelsPage("""{"otherProperty": 123}""")
+            org.junit.Assert.fail("Expected IllegalArgumentException")
+        } catch (e: IllegalArgumentException) {
+            assertTrue(e.message!!.contains("Missing 'models' property"))
+        }
+    }
+
+    @Test
+    fun testParseModelsPageEmptyModelsArray() {
+        val analyzer = GeminiVisionAnalyzer(keyStore)
+        val page = analyzer.parseModelsPage("""{"models": []}""")
+        assertTrue(page.models.isEmpty())
+        assertNull(page.nextPageToken)
+    }
+
     // ==========================================
     // GENERATION GUARD TESTS
     // ==========================================
