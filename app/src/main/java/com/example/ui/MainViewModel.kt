@@ -7,6 +7,8 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.ai.AnalysisResult
 import com.example.ai.ConnectionTestResult
+import com.example.ai.GeminiModel
+import com.example.ai.GeminiQuotaInfo
 import com.example.ai.GeminiVisionAnalyzer
 import com.example.capture.ScreenCaptureEngine
 import com.example.capture.ScreenCaptureService
@@ -25,8 +27,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     val apiKeyStore = GeminiApiKeyStore(application)
     private val settingsRepository = SettingsRepository(application)
-    val visionAnalyzer = GeminiVisionAnalyzer(apiKeyStore)
+
+    // Selected model state
+    private val _selectedModel = MutableStateFlow(settingsRepository.loadSelectedModel())
+    val selectedModel: StateFlow<String> = _selectedModel.asStateFlow()
+
+    // Discovered models list
+    private val _discoveredModels = MutableStateFlow(settingsRepository.loadDiscoveredModels())
+    val discoveredModels: StateFlow<List<GeminiModel>> = _discoveredModels.asStateFlow()
+
+    val visionAnalyzer = GeminiVisionAnalyzer(
+        apiKeyStore = apiKeyStore,
+        modelProvider = { _selectedModel.value }
+    )
     val controller = MonitoringController(visionAnalyzer, viewModelScope)
+
+    // Quota and API status
+    val quotaInfo: StateFlow<GeminiQuotaInfo> = visionAnalyzer.quotaInfo
 
     // Saved contexts & selected context
     private val _savedContexts = MutableStateFlow(settingsRepository.loadContexts())
@@ -70,6 +87,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun navigateTo(route: ScreenRoute) {
         _currentRoute.value = route
+    }
+
+    fun selectModel(modelId: String) {
+        val cleanModel = modelId.trim().removePrefix("models/").ifBlank { SettingsRepository.DEFAULT_MODEL }
+        _selectedModel.value = cleanModel
+        settingsRepository.saveSelectedModel(cleanModel)
+    }
+
+    fun fetchAvailableModels() {
+        if (_isTestingConnection.value) return
+        viewModelScope.launch {
+            _isTestingConnection.value = true
+            val result = visionAnalyzer.discoverModels()
+            result.onSuccess { models ->
+                if (models.isNotEmpty()) {
+                    _discoveredModels.value = models
+                    settingsRepository.saveDiscoveredModels(models)
+                }
+            }
+            _isTestingConnection.value = false
+        }
     }
 
     fun selectContext(context: AnalysisContext) {
@@ -118,6 +156,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _hasApiKey.value = apiKeyStore.hasApiKey()
         _maskedApiKey.value = apiKeyStore.getMaskedApiKey()
         _testResult.value = null
+        // Automatically test connection and discover models
+        testConnection()
     }
 
     fun clearApiKey() {
@@ -134,6 +174,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _testResult.value = null
             val result = visionAnalyzer.testConnection()
             _testResult.value = result
+            if (result is ConnectionTestResult.Success && result.models.isNotEmpty()) {
+                _discoveredModels.value = result.models
+                settingsRepository.saveDiscoveredModels(result.models)
+            }
             _isTestingConnection.value = false
         }
     }

@@ -2,11 +2,12 @@ package com.example.data
 
 import android.content.Context
 import android.content.SharedPreferences
+import com.example.ai.GeminiModel
 import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * Manages persistence for CaptureSettings and AnalysisContexts.
+ * Manages persistence for CaptureSettings, AnalysisContexts, and Gemini Model preferences.
  * Strictly guarantees all retrieved and stored values are clamped within safe ranges.
  */
 class SettingsRepository(context: Context) {
@@ -88,12 +89,69 @@ class SettingsRepository(context: Context) {
         prefs.edit().putString(KEY_SELECTED_CONTEXT_ID, id).apply()
     }
 
+    fun loadSelectedModel(): String {
+        return prefs.getString(KEY_SELECTED_MODEL, DEFAULT_MODEL) ?: DEFAULT_MODEL
+    }
+
+    fun saveSelectedModel(model: String) {
+        val cleanModel = model.trim().removePrefix("models/").ifBlank { DEFAULT_MODEL }
+        prefs.edit().putString(KEY_SELECTED_MODEL, cleanModel).apply()
+    }
+
+    fun loadDiscoveredModels(): List<GeminiModel> {
+        val jsonString = prefs.getString(KEY_DISCOVERED_MODELS, null) ?: return emptyList()
+        return try {
+            val jsonArray = JSONArray(jsonString)
+            val list = mutableListOf<GeminiModel>()
+            for (i in 0 until jsonArray.length()) {
+                val obj = jsonArray.getJSONObject(i)
+                val methodsArray = obj.optJSONArray("methods")
+                val methods = mutableListOf<String>()
+                if (methodsArray != null) {
+                    for (j in 0 until methodsArray.length()) {
+                        methods.add(methodsArray.optString(j))
+                    }
+                }
+                list.add(
+                    GeminiModel(
+                        name = obj.getString("name"),
+                        displayName = obj.optString("displayName", obj.getString("name")),
+                        description = obj.optString("description", ""),
+                        supportedGenerationMethods = methods
+                    )
+                )
+            }
+            list
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    fun saveDiscoveredModels(models: List<GeminiModel>) {
+        val jsonArray = JSONArray()
+        models.forEach { m ->
+            val obj = JSONObject().apply {
+                put("name", m.name)
+                put("displayName", m.displayName)
+                put("description", m.description)
+                val methodsArr = JSONArray()
+                m.supportedGenerationMethods.forEach { methodsArr.put(it) }
+                put("methods", methodsArr)
+            }
+            jsonArray.put(obj)
+        }
+        prefs.edit().putString(KEY_DISCOVERED_MODELS, jsonArray.toString()).apply()
+    }
+
     companion object {
+        const val DEFAULT_MODEL = "gemini-2.5-flash"
         private const val PREFS_NAME = "ai_screen_analyzer_settings"
         private const val KEY_DELAY = "capture_delay_seconds"
         private const val KEY_RESOLUTION = "max_resolution_dimension"
         private const val KEY_QUALITY = "compression_quality"
         private const val KEY_SAVED_CONTEXTS = "saved_contexts_json"
         private const val KEY_SELECTED_CONTEXT_ID = "selected_context_id"
+        private const val KEY_SELECTED_MODEL = "selected_gemini_model"
+        private const val KEY_DISCOVERED_MODELS = "discovered_gemini_models"
     }
 }

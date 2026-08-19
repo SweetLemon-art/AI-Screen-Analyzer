@@ -20,13 +20,14 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Key
-import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Speed
@@ -66,7 +67,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.ai.ConnectionTestResult
 import com.example.ui.components.DelaySelector
-import com.example.ui.theme.AmberAccent
 import com.example.ui.theme.EmeraldSuccess
 import com.example.ui.theme.NeonCyan
 import com.example.ui.theme.NeonVioletLight
@@ -87,6 +87,9 @@ fun SettingsScreen(
     val maskedApiKey by viewModel.maskedApiKey.collectAsState()
     val isTestingConnection by viewModel.isTestingConnection.collectAsState()
     val testResult by viewModel.testResult.collectAsState()
+    val selectedModel by viewModel.selectedModel.collectAsState()
+    val discoveredModels by viewModel.discoveredModels.collectAsState()
+    val quotaInfo by viewModel.quotaInfo.collectAsState()
 
     var inputKeyText by remember { mutableStateOf("") }
     var isPasswordVisible by remember { mutableStateOf(false) }
@@ -108,7 +111,7 @@ fun SettingsScreen(
                 color = Color.White
             )
             Text(
-                text = "Manage your Gemini API Key, capture delays, and processing resolution.",
+                text = "Manage your Gemini API Key, model picker, delays, and resolution.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -220,7 +223,7 @@ fun SettingsScreen(
                             if (inputKeyText.isNotBlank()) {
                                 viewModel.saveApiKey(inputKeyText)
                                 inputKeyText = ""
-                                Toast.makeText(context, "API Key securely stored in Android KeyStore", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(context, "API Key securely stored", Toast.LENGTH_SHORT).show()
                             }
                         }
                     ),
@@ -314,7 +317,7 @@ fun SettingsScreen(
                                     modifier = Modifier.size(18.dp)
                                 )
                                 Text(
-                                    text = "Test API",
+                                    text = "Test & Discover",
                                     fontWeight = FontWeight.SemiBold,
                                     color = if (hasApiKey) NeonVioletLight else MaterialTheme.colorScheme.onSurfaceVariant
                                 )
@@ -381,6 +384,220 @@ fun SettingsScreen(
                                     )
                                 }
                             }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Gemini API Status Card (Observable Real Quota Metadata)
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(18.dp),
+            colors = CardDefaults.cardColors(containerColor = Slate900),
+            border = androidx.compose.foundation.BorderStroke(1.dp, Slate700)
+        ) {
+            Column(
+                modifier = Modifier.padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Info,
+                        contentDescription = null,
+                        tint = NeonCyan,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Text(
+                        text = "GEMINI API STATUS",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        letterSpacing = 1.sp
+                    )
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(text = "Status:", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        text = quotaInfo.status,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = if (quotaInfo.status == "Connected") EmeraldSuccess else if (quotaInfo.status == "Error") RoseError else Color.White
+                    )
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(text = "Quota:", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        text = quotaInfo.quota,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = if (quotaInfo.quota == "Limited") RoseError else Color.White
+                    )
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(text = "Rate limit:", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        text = quotaInfo.rateLimit,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = if (quotaInfo.rateLimit == "Limited") RoseError else EmeraldSuccess
+                    )
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(text = "Last quota error:", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        text = quotaInfo.lastQuotaError,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = if (quotaInfo.lastQuotaError == "None") MaterialTheme.colorScheme.onSurfaceVariant else RoseError
+                    )
+                }
+            }
+        }
+
+        // Dynamic Gemini Model Picker Card
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(18.dp),
+            colors = CardDefaults.cardColors(containerColor = Slate900),
+            border = androidx.compose.foundation.BorderStroke(1.dp, Slate700)
+        ) {
+            Column(
+                modifier = Modifier.padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.AutoAwesome,
+                            contentDescription = null,
+                            tint = NeonVioletLight,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Text(
+                            text = "GEMINI MODEL SELECTION",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            letterSpacing = 1.sp
+                        )
+                    }
+
+                    if (hasApiKey) {
+                        IconButton(
+                            onClick = { viewModel.fetchAvailableModels() },
+                            modifier = Modifier.size(32.dp).testTag("refresh_models_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Refresh,
+                                contentDescription = "Refresh Models",
+                                tint = NeonVioletLight,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    }
+                }
+
+                val modelsToShow = if (discoveredModels.isNotEmpty()) {
+                    discoveredModels
+                } else {
+                    listOf(
+                        com.example.ai.GeminiModel(
+                            name = "models/gemini-2.5-flash",
+                            displayName = "Gemini 2.5 Flash",
+                            description = "Fast, multimodal, high-efficiency screen analyzer",
+                            supportedGenerationMethods = listOf("generateContent")
+                        ),
+                        com.example.ai.GeminiModel(
+                            name = "models/gemini-2.0-flash",
+                            displayName = "Gemini 2.0 Flash",
+                            description = "Next-generation multimodal reasoning and vision",
+                            supportedGenerationMethods = listOf("generateContent")
+                        ),
+                        com.example.ai.GeminiModel(
+                            name = "models/gemini-1.5-flash",
+                            displayName = "Gemini 1.5 Flash",
+                            description = "Lightweight multimodal model",
+                            supportedGenerationMethods = listOf("generateContent")
+                        ),
+                        com.example.ai.GeminiModel(
+                            name = "models/gemini-1.5-pro",
+                            displayName = "Gemini 1.5 Pro",
+                            description = "High-reasoning multimodal model",
+                            supportedGenerationMethods = listOf("generateContent")
+                        )
+                    )
+                }
+
+                modelsToShow.forEach { model ->
+                    val isSelected = selectedModel == model.modelId || selectedModel == model.name
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("model_option_${model.modelId}")
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(if (isSelected) Slate800 else Color.Transparent)
+                            .border(
+                                1.dp,
+                                if (isSelected) NeonVioletLight else Slate700.copy(alpha = 0.5f),
+                                RoundedCornerShape(12.dp)
+                            )
+                            .clickable {
+                                viewModel.selectModel(model.modelId)
+                            }
+                            .padding(14.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = model.displayName,
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = if (isSelected) NeonVioletLight else Color.White
+                            )
+                            if (model.description.isNotBlank()) {
+                                Text(
+                                    text = model.description,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 2
+                                )
+                            }
+                        }
+                        if (isSelected) {
+                            Icon(
+                                imageVector = Icons.Default.Check,
+                                contentDescription = "Selected",
+                                tint = NeonVioletLight,
+                                modifier = Modifier.size(18.dp)
+                            )
                         }
                     }
                 }
