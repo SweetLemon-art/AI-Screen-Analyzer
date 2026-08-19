@@ -132,6 +132,30 @@ class SettingsRepositoryTest {
         repository.saveSelectedContextId("chart_analysis")
         assertEquals("chart_analysis", repository.loadSelectedContextId())
     }
+
+    @Test
+    fun testDiscoveredModelsPersistence() {
+        val models = listOf(
+            com.example.ai.GeminiModel(
+                modelId = "gemini-2.5-flash",
+                name = "models/gemini-2.5-flash",
+                displayName = "Gemini 2.5 Flash",
+                description = "Fast multimodal",
+                supportedGenerationMethods = listOf("generateContent"),
+                inputTokenLimit = 1048576,
+                outputTokenLimit = 8192
+            )
+        )
+        repository.saveDiscoveredModels(models)
+        val loaded = repository.loadDiscoveredModels()
+        assertEquals(1, loaded.size)
+        assertEquals("gemini-2.5-flash", loaded[0].modelId)
+        assertEquals("Gemini 2.5 Flash", loaded[0].displayName)
+        assertEquals(1048576, loaded[0].inputTokenLimit)
+
+        repository.saveSelectedModel("gemini-2.5-flash")
+        assertEquals("gemini-2.5-flash", repository.loadSelectedModel())
+    }
 }
 
 @RunWith(RobolectricTestRunner::class)

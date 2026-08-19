@@ -116,7 +116,6 @@ class SettingsRepository(context: Context) {
                 val outputLimit = if (obj.has("outputTokenLimit")) obj.optInt("outputTokenLimit") else null
                 val version = if (obj.has("version")) obj.optString("version", null) else null
                 val baseModelId = if (obj.has("baseModelId")) obj.optString("baseModelId", null) else null
-                val isVision = obj.optBoolean("isVisionCapable", false)
 
                 list.add(
                     GeminiModel(
@@ -127,8 +126,7 @@ class SettingsRepository(context: Context) {
                         inputTokenLimit = inputLimit,
                         outputTokenLimit = outputLimit,
                         version = version,
-                        baseModelId = baseModelId,
-                        isVisionCapable = isVision
+                        baseModelId = baseModelId
                     )
                 )
             }
@@ -152,7 +150,6 @@ class SettingsRepository(context: Context) {
                 m.outputTokenLimit?.let { put("outputTokenLimit", it) }
                 m.version?.let { put("version", it) }
                 m.baseModelId?.let { put("baseModelId", it) }
-                put("isVisionCapable", m.isVisionCapable)
             }
             jsonArray.put(obj)
         }

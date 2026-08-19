@@ -7,6 +7,7 @@ import com.example.ai.AnalysisResult
 import com.example.ai.ConnectionTestResult
 import com.example.ai.GeminiModel
 import com.example.ai.GeminiVisionAnalyzer
+import com.example.ai.RateLimitState
 import com.example.ai.VisionAnalyzer
 import com.example.capture.CaptureResult
 import com.example.capture.ScreenCaptureEngine
@@ -115,8 +116,7 @@ class GeminiVisionAnalyzerQuotaAndModelTest {
         val success = result as ConnectionTestResult.Success
         assertEquals(1, success.models.size) // Only generateContent model
         assertEquals("gemini-2.5-flash", success.models[0].modelId)
-        assertEquals("Connected", analyzer.quotaInfo.value.status)
-        assertEquals("Available", analyzer.quotaInfo.value.quota)
+        assertEquals(RateLimitState.NORMAL, analyzer.rateLimitState.value)
     }
 
     // 2. 401 Unauthorized
@@ -136,8 +136,7 @@ class GeminiVisionAnalyzerQuotaAndModelTest {
         val analyzer = GeminiVisionAnalyzer(keyStore, client = client)
         val testResult = analyzer.testConnection()
         assertTrue(testResult is ConnectionTestResult.Error)
-        assertEquals("API key is invalid or unauthorized.", (testResult as ConnectionTestResult.Error).message)
-        assertEquals("Error", analyzer.quotaInfo.value.status)
+        assertEquals("API key is invalid.", (testResult as ConnectionTestResult.Error).message)
     }
 
     // 3. 403 Forbidden
@@ -157,7 +156,7 @@ class GeminiVisionAnalyzerQuotaAndModelTest {
         val analyzer = GeminiVisionAnalyzer(keyStore, client = client)
         val testResult = analyzer.testConnection()
         assertTrue(testResult is ConnectionTestResult.Error)
-        assertEquals("API key is invalid or unauthorized.", (testResult as ConnectionTestResult.Error).message)
+        assertEquals("API key is unauthorized or permission denied.", (testResult as ConnectionTestResult.Error).message)
     }
 
     // 4. 404 Model Not Found
@@ -177,7 +176,7 @@ class GeminiVisionAnalyzerQuotaAndModelTest {
         val analyzer = GeminiVisionAnalyzer(keyStore, client = client)
         val testResult = analyzer.testConnection()
         assertTrue(testResult is ConnectionTestResult.Error)
-        assertEquals("Gemini API endpoint or configuration was not found.", (testResult as ConnectionTestResult.Error).message)
+        assertEquals("Gemini endpoint or model was not found.", (testResult as ConnectionTestResult.Error).message)
     }
 
     // 5. 429 Rate Limit
@@ -197,8 +196,66 @@ class GeminiVisionAnalyzerQuotaAndModelTest {
         val analyzer = GeminiVisionAnalyzer(keyStore, client = client)
         val testResult = analyzer.testConnection()
         assertTrue(testResult is ConnectionTestResult.Error)
-        assertEquals("Gemini API quota or rate limit reached.", (testResult as ConnectionTestResult.Error).message)
-        assertEquals("Active", analyzer.quotaInfo.value.rateLimit)
+        assertEquals("Gemini API rate limit reached.", (testResult as ConnectionTestResult.Error).message)
+        assertEquals(RateLimitState.RATE_LIMITED, analyzer.rateLimitState.value)
+    }
+
+    // Strict validation tests
+    @Test
+    fun testMalformedJsonResponseFails() = runTest {
+        keyStore.saveApiKey("test-key")
+        val client = createClient { chain ->
+            Response.Builder()
+                .request(chain.request())
+                .protocol(Protocol.HTTP_1_1)
+                .code(200)
+                .message("OK")
+                .body("{}".toResponseBody("application/json".toMediaType()))
+                .build()
+        }
+
+        val analyzer = GeminiVisionAnalyzer(keyStore, client = client)
+        val result = analyzer.discoverModels()
+        assertTrue(result.isFailure)
+        assertTrue(result.exceptionOrNull()!!.message!!.contains("MALFORMED_MODEL_RESPONSE"))
+    }
+
+    @Test
+    fun testMissingModelsPropertyFails() = runTest {
+        keyStore.saveApiKey("test-key")
+        val client = createClient { chain ->
+            Response.Builder()
+                .request(chain.request())
+                .protocol(Protocol.HTTP_1_1)
+                .code(200)
+                .message("OK")
+                .body("""{"foo":"bar"}""".toResponseBody("application/json".toMediaType()))
+                .build()
+        }
+
+        val analyzer = GeminiVisionAnalyzer(keyStore, client = client)
+        val result = analyzer.discoverModels()
+        assertTrue(result.isFailure)
+        assertTrue(result.exceptionOrNull()!!.message!!.contains("MALFORMED_MODEL_RESPONSE"))
+    }
+
+    @Test
+    fun testValidEmptyModelsArraySucceeds() = runTest {
+        keyStore.saveApiKey("test-key")
+        val client = createClient { chain ->
+            Response.Builder()
+                .request(chain.request())
+                .protocol(Protocol.HTTP_1_1)
+                .code(200)
+                .message("OK")
+                .body("""{"models":[]}""".toResponseBody("application/json".toMediaType()))
+                .build()
+        }
+
+        val analyzer = GeminiVisionAnalyzer(keyStore, client = client)
+        val result = analyzer.discoverModels()
+        assertTrue(result.isSuccess)
+        assertEquals(0, result.getOrNull()!!.size)
     }
 
     // Multi-page Pagination Test
@@ -256,7 +313,6 @@ class GeminiVisionAnalyzerQuotaAndModelTest {
         val models = result.getOrNull() ?: emptyList()
         assertEquals(2, models.size)
         assertEquals("gemini-2.5-flash", models[0].modelId)
-        assertTrue(models[0].isVisionCapable)
         assertEquals(1048576, models[0].inputTokenLimit)
         assertEquals("gemini-2.0-flash", models[1].modelId)
         assertEquals(2, requestedUrls.size)
@@ -495,9 +551,9 @@ class GeminiVisionAnalyzerQuotaAndModelTest {
         assertTrue((testResult as ConnectionTestResult.Error).message.contains("Connection test failed"))
     }
 
-    // 13 & 14. Quota error does not kill MonitoringController or create duplicates
+    // 13 & 14. Rate limit error does not kill MonitoringController or create duplicates
     @Test
-    fun testQuotaErrorDoesNotKillMonitoringControllerOrDuplicateJobs() = runTest {
+    fun testRateLimitErrorDoesNotKillMonitoringControllerOrDuplicateJobs() = runTest {
         keyStore.saveApiKey("test-key")
         val testDispatcher = StandardTestDispatcher(testScheduler)
         val testScope = TestScope(testDispatcher)
@@ -638,7 +694,7 @@ class GeminiVisionAnalyzerQuotaAndModelTest {
         val result = analyzer.analyze(bitmap, AnalysisContext.DEFAULT, CaptureSettings.DEFAULT)
 
         assertFalse(result.isSuccess)
-        assertEquals("Gemini API endpoint or configuration was not found.", result.errorMessage)
+        assertEquals("Gemini endpoint or model was not found.", result.errorMessage)
     }
 }
 
@@ -713,7 +769,7 @@ class MonitoringControllerLifecycleRaceTest {
         val testScope = TestScope(testDispatcher)
 
         val fakeAnalyzer = object : VisionAnalyzer {
-            override val quotaInfo = MutableStateFlow(com.example.ai.GeminiQuotaInfo()).asStateFlow()
+            override val rateLimitState = MutableStateFlow(RateLimitState.NORMAL).asStateFlow()
             override suspend fun analyze(bitmap: Bitmap, context: AnalysisContext, settings: CaptureSettings): AnalysisResult {
                 return AnalysisResult(
                     contextName = context.name,
@@ -747,7 +803,7 @@ class MonitoringControllerLifecycleRaceTest {
 
         var analysisCallCount = 0
         val fakeAnalyzer = object : VisionAnalyzer {
-            override val quotaInfo = MutableStateFlow(com.example.ai.GeminiQuotaInfo()).asStateFlow()
+            override val rateLimitState = MutableStateFlow(RateLimitState.NORMAL).asStateFlow()
             override suspend fun analyze(bitmap: Bitmap, context: AnalysisContext, settings: CaptureSettings): AnalysisResult {
                 analysisCallCount++
                 return AnalysisResult(
@@ -785,7 +841,7 @@ class MonitoringControllerLifecycleRaceTest {
         val testScope = TestScope(testDispatcher)
 
         val fakeAnalyzer = object : VisionAnalyzer {
-            override val quotaInfo = MutableStateFlow(com.example.ai.GeminiQuotaInfo()).asStateFlow()
+            override val rateLimitState = MutableStateFlow(RateLimitState.NORMAL).asStateFlow()
             override suspend fun analyze(bitmap: Bitmap, context: AnalysisContext, settings: CaptureSettings): AnalysisResult {
                 return AnalysisResult(
                     contextName = context.name,
@@ -821,7 +877,7 @@ class MonitoringControllerLifecycleRaceTest {
 
         var analysisCallCount = 0
         val fakeAnalyzer = object : VisionAnalyzer {
-            override val quotaInfo = MutableStateFlow(com.example.ai.GeminiQuotaInfo()).asStateFlow()
+            override val rateLimitState = MutableStateFlow(RateLimitState.NORMAL).asStateFlow()
             override suspend fun analyze(bitmap: Bitmap, context: AnalysisContext, settings: CaptureSettings): AnalysisResult {
                 analysisCallCount++
                 return AnalysisResult(
@@ -878,7 +934,7 @@ class MonitoringControllerLifecycleRaceTest {
 
         var analyzeCalled = false
         val fakeAnalyzer = object : VisionAnalyzer {
-            override val quotaInfo = MutableStateFlow(com.example.ai.GeminiQuotaInfo()).asStateFlow()
+            override val rateLimitState = MutableStateFlow(RateLimitState.NORMAL).asStateFlow()
             override suspend fun analyze(bitmap: Bitmap, context: AnalysisContext, settings: CaptureSettings): AnalysisResult {
                 analyzeCalled = true
                 return AnalysisResult(
@@ -922,7 +978,7 @@ class MonitoringControllerLifecycleRaceTest {
         val geminiGate = CompletableDeferred<Unit>()
 
         val fakeAnalyzer = object : VisionAnalyzer {
-            override val quotaInfo = MutableStateFlow(com.example.ai.GeminiQuotaInfo()).asStateFlow()
+            override val rateLimitState = MutableStateFlow(RateLimitState.NORMAL).asStateFlow()
             override suspend fun analyze(bitmap: Bitmap, context: AnalysisContext, settings: CaptureSettings): AnalysisResult {
                 geminiStarted.complete(Unit)
                 geminiGate.await()
@@ -964,7 +1020,7 @@ class MonitoringControllerLifecycleRaceTest {
         val testScope = TestScope(testDispatcher)
 
         val fakeAnalyzer = object : VisionAnalyzer {
-            override val quotaInfo = MutableStateFlow(com.example.ai.GeminiQuotaInfo()).asStateFlow()
+            override val rateLimitState = MutableStateFlow(RateLimitState.NORMAL).asStateFlow()
             override suspend fun analyze(bitmap: Bitmap, context: AnalysisContext, settings: CaptureSettings): AnalysisResult {
                 return AnalysisResult(
                     contextName = context.name,
@@ -1004,7 +1060,7 @@ class MonitoringControllerLifecycleRaceTest {
         var sessionCount = 0
 
         val fakeAnalyzer = object : VisionAnalyzer {
-            override val quotaInfo = MutableStateFlow(com.example.ai.GeminiQuotaInfo()).asStateFlow()
+            override val rateLimitState = MutableStateFlow(RateLimitState.NORMAL).asStateFlow()
             override suspend fun analyze(bitmap: Bitmap, context: AnalysisContext, settings: CaptureSettings): AnalysisResult {
                 sessionCount++
                 if (sessionCount == 1) {
@@ -1052,7 +1108,7 @@ class MonitoringControllerLifecycleRaceTest {
         val testScope = TestScope(testDispatcher)
 
         val fakeAnalyzer = object : VisionAnalyzer {
-            override val quotaInfo = MutableStateFlow(com.example.ai.GeminiQuotaInfo()).asStateFlow()
+            override val rateLimitState = MutableStateFlow(RateLimitState.NORMAL).asStateFlow()
             override suspend fun analyze(bitmap: Bitmap, context: AnalysisContext, settings: CaptureSettings): AnalysisResult {
                 return AnalysisResult(
                     contextName = context.name,
@@ -1087,7 +1143,7 @@ class MonitoringControllerLifecycleRaceTest {
         var maxConcurrentLoops = 0
 
         val fakeAnalyzer = object : VisionAnalyzer {
-            override val quotaInfo = MutableStateFlow(com.example.ai.GeminiQuotaInfo()).asStateFlow()
+            override val rateLimitState = MutableStateFlow(RateLimitState.NORMAL).asStateFlow()
             override suspend fun analyze(bitmap: Bitmap, context: AnalysisContext, settings: CaptureSettings): AnalysisResult {
                 val current = concurrentLoops.incrementAndGet()
                 if (current > maxConcurrentLoops) maxConcurrentLoops = current

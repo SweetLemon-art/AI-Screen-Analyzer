@@ -91,7 +91,7 @@ fun SettingsScreen(
     val selectedModel by viewModel.selectedModel.collectAsState()
     val discoveredModels by viewModel.discoveredModels.collectAsState()
     val modelValidationMessage by viewModel.modelValidationMessage.collectAsState()
-    val quotaInfo by viewModel.quotaInfo.collectAsState()
+    val rateLimitState by viewModel.rateLimitState.collectAsState()
 
     var inputKeyText by remember { mutableStateOf("") }
     var isPasswordVisible by remember { mutableStateOf(false) }
@@ -447,7 +447,7 @@ fun SettingsScreen(
             }
         }
 
-        // Gemini API Status Card (Observable Real Quota Metadata)
+        // Gemini API Status Card
         Card(
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(18.dp),
@@ -483,23 +483,10 @@ fun SettingsScreen(
                 ) {
                     Text(text = "Status:", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Text(
-                        text = quotaInfo.status,
+                        text = if (hasApiKey) "Configured" else "Not Configured",
                         fontSize = 13.sp,
                         fontWeight = FontWeight.Bold,
-                        color = if (quotaInfo.status == "Connected") EmeraldSuccess else if (quotaInfo.status == "Error") RoseError else Color.White
-                    )
-                }
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text(text = "Quota:", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text(
-                        text = quotaInfo.quota,
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = if (quotaInfo.quota == "Limited") RoseError else Color.White
+                        color = if (hasApiKey) EmeraldSuccess else RoseError
                     )
                 }
 
@@ -508,24 +495,20 @@ fun SettingsScreen(
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Text(text = "Rate limit:", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    val rateLimitText = when (rateLimitState) {
+                        com.example.ai.RateLimitState.RATE_LIMITED -> "Active"
+                        com.example.ai.RateLimitState.NORMAL -> "Normal"
+                        com.example.ai.RateLimitState.UNKNOWN -> "Normal"
+                    }
+                    val rateLimitColor = when (rateLimitState) {
+                        com.example.ai.RateLimitState.RATE_LIMITED -> RoseError
+                        else -> EmeraldSuccess
+                    }
                     Text(
-                        text = quotaInfo.rateLimit,
+                        text = rateLimitText,
                         fontSize = 13.sp,
                         fontWeight = FontWeight.SemiBold,
-                        color = if (quotaInfo.rateLimit == "Limited") RoseError else EmeraldSuccess
-                    )
-                }
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text(text = "Last quota error:", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text(
-                        text = quotaInfo.lastQuotaError,
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.Medium,
-                        color = if (quotaInfo.lastQuotaError == "None") MaterialTheme.colorScheme.onSurfaceVariant else RoseError
+                        color = rateLimitColor
                     )
                 }
             }
@@ -651,21 +634,6 @@ fun SettingsScreen(
                                         fontWeight = FontWeight.Bold,
                                         color = if (isSelected) NeonVioletLight else Color.White
                                     )
-                                    if (model.isVisionCapable) {
-                                        Box(
-                                            modifier = Modifier
-                                                .clip(RoundedCornerShape(6.dp))
-                                                .background(Color(0x2200E5FF))
-                                                .padding(horizontal = 6.dp, vertical = 2.dp)
-                                        ) {
-                                            Text(
-                                                text = "VISION",
-                                                fontSize = 9.sp,
-                                                fontWeight = FontWeight.Bold,
-                                                color = NeonCyan
-                                            )
-                                        }
-                                    }
                                 }
                                 if (model.description.isNotBlank()) {
                                     Text(

@@ -10,6 +10,12 @@ sealed class ConnectionTestResult {
     data class Error(val message: String) : ConnectionTestResult()
 }
 
+enum class RateLimitState {
+    UNKNOWN,
+    NORMAL,
+    RATE_LIMITED
+}
+
 /**
  * Representation of a Gemini model discovered dynamically via models.list API.
  */
@@ -21,28 +27,14 @@ data class GeminiModel(
     val inputTokenLimit: Int? = null,
     val outputTokenLimit: Int? = null,
     val version: String? = null,
-    val baseModelId: String? = null,
-    val isVisionCapable: Boolean = false
+    val baseModelId: String? = null
 ) {
     val modelId: String
         get() = name.removePrefix("models/")
 }
 
-/**
- * Real client-observed quota and rate-limit metadata.
- * Note: Only actual headers and status codes returned by Gemini API are exposed.
- * No artificial local limits or local request counters are used.
- */
-data class GeminiQuotaInfo(
-    val status: String = "Not Configured", // "Connected", "Not Configured", "Error"
-    val quota: String = "Unknown",         // "Available", "Limited", "Unknown"
-    val rateLimit: String = "Normal",      // "Normal", "Active"
-    val lastQuotaError: String = "None",
-    val retryAfterSeconds: Int? = null
-)
-
 interface VisionAnalyzer {
-    val quotaInfo: StateFlow<GeminiQuotaInfo>
+    val rateLimitState: StateFlow<RateLimitState>
 
     /**
      * Sends the captured screen bitmap together with the user-defined analysis context

@@ -39,15 +39,8 @@ class GeminiVisionAnalyzer(
     private val baseUrl: String = "https://generativelanguage.googleapis.com"
 ) : VisionAnalyzer {
 
-    private val _quotaInfo = MutableStateFlow(
-        GeminiQuotaInfo(
-            status = if (apiKeyStore.hasApiKey()) "Connected" else "Not Configured",
-            quota = "Unknown",
-            rateLimit = "Normal",
-            lastQuotaError = "None"
-        )
-    )
-    override val quotaInfo: StateFlow<GeminiQuotaInfo> = _quotaInfo.asStateFlow()
+    private val _rateLimitState = MutableStateFlow(RateLimitState.UNKNOWN)
+    override val rateLimitState: StateFlow<RateLimitState> = _rateLimitState.asStateFlow()
 
     private fun getCleanBaseUrl(): String = baseUrl.trimEnd('/')
 
@@ -70,7 +63,6 @@ class GeminiVisionAnalyzer(
 
         if (apiKey.isNullOrBlank()) {
             val duration = System.currentTimeMillis() - startTime
-            _quotaInfo.value = _quotaInfo.value.copy(status = "Not Configured", quota = "Unknown")
             return@withContext AnalysisResult(
                 contextName = context.name,
                 summary = "API Key not configured",
@@ -202,13 +194,7 @@ class GeminiVisionAnalyzer(
                 }
 
                 if (isSuccess) {
-                    _quotaInfo.value = _quotaInfo.value.copy(
-                        status = "Connected",
-                        rateLimit = "Normal",
-                        quota = "Available",
-                        lastQuotaError = "None",
-                        retryAfterSeconds = null
-                    )
+                    _rateLimitState.value = RateLimitState.NORMAL
 
                     val duration = System.currentTimeMillis() - startTime
                     val rawText = parseGeminiResponseContent(responseBodyString)
@@ -226,18 +212,11 @@ class GeminiVisionAnalyzer(
                     )
                 }
 
-                // Handle HTTP 429 Quota / Rate-limit with bounded backoff
+                // Handle HTTP 429 Rate-limit with bounded backoff
                 if (statusCode == 429) {
+                    _rateLimitState.value = RateLimitState.RATE_LIMITED
                     val retryAfterSeconds = retryAfterHeader?.toIntOrNull()?.coerceIn(1, 30)
                         ?: (2.0.pow(attempt.toDouble()).toLong().coerceIn(2L, 30L)).toInt()
-
-                    _quotaInfo.value = _quotaInfo.value.copy(
-                        status = "Connected",
-                        rateLimit = "Active",
-                        quota = "Limited",
-                        lastQuotaError = "HTTP 429: Gemini API quota or rate limit reached.",
-                        retryAfterSeconds = retryAfterSeconds
-                    )
 
                     if (attempt < maxRetries) {
                         attempt++
@@ -247,11 +226,7 @@ class GeminiVisionAnalyzer(
                     } else {
                         // Max retries exceeded
                         val duration = System.currentTimeMillis() - startTime
-                        val userErrorMessage = if (retryAfterHeader != null) {
-                            "Gemini quota/rate limit reached. Try again in $retryAfterSeconds seconds."
-                        } else {
-                            "Gemini API quota or rate limit reached."
-                        }
+                        val userErrorMessage = "Gemini API rate limit reached."
                         return@withContext AnalysisResult(
                             contextName = context.name,
                             summary = "Rate limit reached (429)",
@@ -268,13 +243,6 @@ class GeminiVisionAnalyzer(
                 // Non-429 error response (e.g. 401, 403, 404, 5xx)
                 val duration = System.currentTimeMillis() - startTime
                 val userErrorMessage = sanitizeHttpError(statusCode, responseBodyString)
-
-                if (statusCode in 401..403) {
-                    _quotaInfo.value = _quotaInfo.value.copy(
-                        status = "Error",
-                        lastQuotaError = "Authentication / Authorization error ($statusCode)"
-                    )
-                }
 
                 return@withContext AnalysisResult(
                     contextName = context.name,
@@ -296,7 +264,7 @@ class GeminiVisionAnalyzer(
                 conclusion = "Please try again later.",
                 rawResponse = "",
                 isSuccess = false,
-                errorMessage = "Gemini API quota or rate limit reached.",
+                errorMessage = "Gemini API rate limit reached.",
                 processingDurationMs = duration
             )
         } catch (e: CancellationException) {
@@ -328,20 +296,12 @@ class GeminiVisionAnalyzer(
     override suspend fun testConnection(): ConnectionTestResult = withContext(Dispatchers.IO) {
         val apiKey = apiKeyStore.getApiKey()
         if (apiKey.isNullOrBlank()) {
-            _quotaInfo.value = GeminiQuotaInfo(status = "Not Configured", quota = "Unknown", rateLimit = "Normal")
             return@withContext ConnectionTestResult.Error("API key is not configured. Please enter a valid Gemini API key.")
         }
 
         val discoveryResult = discoverModels()
         discoveryResult.fold(
             onSuccess = { models ->
-                _quotaInfo.value = GeminiQuotaInfo(
-                    status = "Connected",
-                    quota = "Available",
-                    rateLimit = "Normal",
-                    lastQuotaError = "None",
-                    retryAfterSeconds = null
-                )
                 ConnectionTestResult.Success(
                     message = "Connection successful! Discovered ${models.size} available Gemini model(s).",
                     models = models
@@ -387,21 +347,13 @@ class GeminiVisionAnalyzer(
 
                 if (!isSuccess) {
                     if (statusCode == 429) {
-                        _quotaInfo.value = _quotaInfo.value.copy(
-                            status = "Connected",
-                            rateLimit = "Active",
-                            quota = "Limited",
-                            lastQuotaError = "HTTP 429: Gemini API quota or rate limit reached."
-                        )
-                    } else if (statusCode in 401..403) {
-                        _quotaInfo.value = _quotaInfo.value.copy(
-                            status = "Error",
-                            lastQuotaError = "Invalid or unauthorized API key"
-                        )
+                        _rateLimitState.value = RateLimitState.RATE_LIMITED
                     }
                     val safeError = sanitizeHttpError(statusCode, responseBodyString)
                     return@withContext Result.failure(RuntimeException(safeError))
                 }
+
+                _rateLimitState.value = RateLimitState.NORMAL
 
                 val page = parseModelsPage(responseBodyString)
                 allModels.addAll(page.models)
@@ -418,6 +370,8 @@ class GeminiVisionAnalyzer(
             Result.success(allModels)
         } catch (e: CancellationException) {
             throw e
+        } catch (e: IllegalArgumentException) {
+            Result.failure(e)
         } catch (e: Exception) {
             val safeError = when (e) {
                 is java.net.UnknownHostException -> "Network error: Unable to resolve Gemini server. Check your internet connection."
@@ -453,8 +407,19 @@ class GeminiVisionAnalyzer(
     )
 
     fun parseModelsPage(jsonString: String): ModelsPage {
-        val root = JSONObject(jsonString)
-        val modelsArray = root.optJSONArray("models") ?: JSONArray()
+        val root = try {
+            JSONObject(jsonString)
+        } catch (e: Exception) {
+            throw IllegalArgumentException("MALFORMED_MODEL_RESPONSE: Invalid JSON format", e)
+        }
+
+        if (!root.has("models")) {
+            throw IllegalArgumentException("MALFORMED_MODEL_RESPONSE: Missing 'models' property in response")
+        }
+
+        val modelsArray = root.optJSONArray("models")
+            ?: throw IllegalArgumentException("MALFORMED_MODEL_RESPONSE: 'models' must be an array")
+
         val modelsList = mutableListOf<GeminiModel>()
 
         for (i in 0 until modelsArray.length()) {
@@ -483,9 +448,6 @@ class GeminiVisionAnalyzer(
                 val version = if (modelObj.has("version")) modelObj.optString("version", null) else null
                 val baseModelId = if (modelObj.has("baseModelId")) modelObj.optString("baseModelId", null) else null
 
-                // Multimodal vision capability classification
-                val isVisionCapable = modelId.startsWith("gemini-") || modelId.startsWith("learnlm-")
-
                 modelsList.add(
                     GeminiModel(
                         name = name,
@@ -495,8 +457,7 @@ class GeminiVisionAnalyzer(
                         inputTokenLimit = inputTokenLimit,
                         outputTokenLimit = outputTokenLimit,
                         version = version,
-                        baseModelId = baseModelId,
-                        isVisionCapable = isVisionCapable
+                        baseModelId = baseModelId
                     )
                 )
             }
@@ -513,11 +474,12 @@ class GeminiVisionAnalyzer(
     private fun sanitizeHttpError(statusCode: Int, responseBody: String): String {
         return when (statusCode) {
             400 -> "Invalid request parameters."
-            401, 403 -> "API key is invalid or unauthorized."
-            404 -> "Gemini API endpoint or configuration was not found."
+            401 -> "API key is invalid."
+            403 -> "API key is unauthorized or permission denied."
+            404 -> "Gemini endpoint or model was not found."
             408 -> "Request timeout from server. Please try again."
-            429 -> "Gemini API quota or rate limit reached."
-            500, 502, 503, 504 -> "Gemini service temporarily unavailable."
+            429 -> "Gemini API rate limit reached."
+            in 500..599 -> "Gemini service temporarily unavailable."
             else -> "HTTP $statusCode: Unexpected API error."
         }
     }

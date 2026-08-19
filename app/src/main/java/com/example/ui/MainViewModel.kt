@@ -8,8 +8,8 @@ import androidx.lifecycle.viewModelScope
 import com.example.ai.AnalysisResult
 import com.example.ai.ConnectionTestResult
 import com.example.ai.GeminiModel
-import com.example.ai.GeminiQuotaInfo
 import com.example.ai.GeminiVisionAnalyzer
+import com.example.ai.RateLimitState
 import com.example.capture.ScreenCaptureEngine
 import com.example.capture.ScreenCaptureService
 import com.example.data.AnalysisContext
@@ -46,8 +46,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     )
     val controller = MonitoringController(visionAnalyzer, viewModelScope)
 
-    // Quota and API status
-    val quotaInfo: StateFlow<GeminiQuotaInfo> = visionAnalyzer.quotaInfo
+    // Rate limit status
+    val rateLimitState: StateFlow<RateLimitState> = visionAnalyzer.rateLimitState
 
     // Saved contexts & selected context
     private val _savedContexts = MutableStateFlow(settingsRepository.loadContexts())
@@ -117,13 +117,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _selectedModel.value = ""
             settingsRepository.saveSelectedModel("")
             _modelValidationMessage.value = "Selected Gemini model is no longer available."
-        } else if (currentSelected.isBlank()) {
-            // Auto-select the first vision-capable model if available, otherwise first generateContent model
-            val candidate = models.firstOrNull { it.isVisionCapable } ?: models.firstOrNull()
-            candidate?.let {
-                _selectedModel.value = it.modelId
-                settingsRepository.saveSelectedModel(it.modelId)
-            }
         }
     }
 
