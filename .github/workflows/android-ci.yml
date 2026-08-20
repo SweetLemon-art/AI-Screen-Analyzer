@@ -1,10 +1,8 @@
 name: Android CI
 
 on:
-  # Verify every change merged/pushed to main, while retaining PR and manual runs.
-  push:
-    branches:
-      - main
+  # Keep verification opt-in: PRs and manual runs only.
+  # Direct pushes to main do not automatically start Actions.
   workflow_dispatch:
   pull_request:
     branches:
