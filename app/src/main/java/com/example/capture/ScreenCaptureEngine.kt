@@ -23,6 +23,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.coroutines.resume
 
@@ -30,13 +31,14 @@ import kotlin.coroutines.resume
  * Engine managing MediaProjection, VirtualDisplay, and ImageReader lifecycle.
  *
  * INVARIANTS:
- * - Exactly ONE VirtualDisplay per MediaProjection session.
- * - [captureSingleFrame] NEVER creates or recreates VirtualDisplay.
- * - MediaProjection content resize is handled by recreating only the display/reader pair.
+ * - Exactly ONE VirtualDisplay is created for each MediaProjection session.
+ * - [captureSingleFrame] never creates or recreates a VirtualDisplay.
+ * - Android 14+ captured-content resize is handled with VirtualDisplay.resize()/setSurface().
+ * - ImageReader replacement is deferred until active captures finish, preventing close/use races.
  * - Callbacks are explicitly bound to session generations to prevent stale callback pollution.
  * - Callbacks are unregistered before MediaProjection is stopped.
  * - [stop] is strictly idempotent and safe when called repeatedly.
- * - Synchronized with a Mutex so only one frame capture occurs at any instant.
+ * - [captureSingleFrame] serializes frame capture with a Mutex.
  */
 object ScreenCaptureEngine : ScreenCaptureProvider {
 
@@ -53,6 +55,9 @@ object ScreenCaptureEngine : ScreenCaptureProvider {
 
     @Volatile
     private var imageReader: ImageReader? = null
+
+    private val retiredReaders = mutableListOf<ImageReader>()
+    private val activeCaptureCount = AtomicInteger(0)
 
     private var screenWidth = 1080
     private var screenHeight = 1920
@@ -154,7 +159,6 @@ object ScreenCaptureEngine : ScreenCaptureProvider {
                     override fun onStopped() {
                         super.onStopped()
                         // MediaProjection.Callback.onStop() is the authoritative session-stop signal.
-                        // Intentional display replacement during resize must not stop the session.
                     }
                 },
                 mainHandler
@@ -174,17 +178,67 @@ object ScreenCaptureEngine : ScreenCaptureProvider {
         if (width <= 0 || height <= 0) return
         if (width == screenWidth && height == screenHeight) return
 
-        screenWidth = width
-        screenHeight = height
+        val projection = mediaProjection ?: return
+        val display = virtualDisplay ?: return
+        val oldReader = imageReader ?: return
+
         _isReady.value = false
 
-        releaseDisplayResourcesOnly()
-
-        val projection = mediaProjection ?: return
-        val success = setupSessionResources(projection, generation)
-        _isReady.value = success && generation == sessionGeneration.get()
-        if (!success) {
+        val newReader = try {
+            ImageReader.newInstance(
+                width,
+                height,
+                PixelFormat.RGBA_8888,
+                2
+            )
+        } catch (e: Exception) {
             handleSessionStop(generation)
+            return
+        }
+
+        try {
+            // Android 14+ requires resizing the existing VirtualDisplay rather than
+            // creating another VirtualDisplay from the same MediaProjection session.
+            display.resize(width, height, screenDensity)
+            display.setSurface(newReader.surface)
+
+            screenWidth = width
+            screenHeight = height
+            imageReader = newReader
+
+            // A capture may still be using oldReader. Keep it alive until that capture exits.
+            oldReader.setOnImageAvailableListener(null, null)
+            if (activeCaptureCount.get() == 0) {
+                closeReaderQuietly(oldReader)
+            } else {
+                retiredReaders.add(oldReader)
+            }
+
+            closeRetiredReadersIfIdle()
+            _isReady.value = generation == sessionGeneration.get()
+        } catch (e: Exception) {
+            closeReaderQuietly(newReader)
+            handleSessionStop(generation)
+        }
+    }
+
+    private fun closeRetiredReadersIfIdle() {
+        if (activeCaptureCount.get() != 0) return
+        if (retiredReaders.isEmpty()) return
+
+        val readersToClose = retiredReaders.toList()
+        retiredReaders.clear()
+        readersToClose.forEach(::closeReaderQuietly)
+    }
+
+    private fun closeReaderQuietly(reader: ImageReader?) {
+        try {
+            reader?.setOnImageAvailableListener(null, null)
+        } catch (ignored: Exception) {
+        }
+        try {
+            reader?.close()
+        } catch (ignored: Exception) {
         }
     }
 
@@ -201,11 +255,20 @@ object ScreenCaptureEngine : ScreenCaptureProvider {
 
     override suspend fun captureSingleFrame(): CaptureResult = withContext(Dispatchers.Default) {
         captureMutex.withLock {
-            val reader = imageReader
-            val projection = mediaProjection
-            val vDisplay = virtualDisplay
+            val reader = synchronized(this@ScreenCaptureEngine) {
+                val currentReader = imageReader
+                val projection = mediaProjection
+                val vDisplay = virtualDisplay
 
-            if (reader == null || projection == null || vDisplay == null || !_isReady.value) {
+                if (currentReader == null || projection == null || vDisplay == null || !_isReady.value) {
+                    return@withLock null
+                }
+
+                activeCaptureCount.incrementAndGet()
+                currentReader
+            }
+
+            if (reader == null) {
                 return@withContext CaptureResult.Error("Screen capture session is not active or permission was revoked.")
             }
 
@@ -248,7 +311,8 @@ object ScreenCaptureEngine : ScreenCaptureProvider {
                         cont.invokeOnCancellation {
                             try {
                                 reader.setOnImageAvailableListener(null, null)
-                            } catch (ignored: Exception) {}
+                            } catch (ignored: Exception) {
+                            }
                         }
                     }
                 }
@@ -262,29 +326,31 @@ object ScreenCaptureEngine : ScreenCaptureProvider {
                 throw e
             } catch (e: Exception) {
                 CaptureResult.Error("Screen capture error: ${e.localizedMessage ?: e.message}")
+            } finally {
+                synchronized(this@ScreenCaptureEngine) {
+                    activeCaptureCount.decrementAndGet()
+                    closeRetiredReadersIfIdle()
+                }
             }
         }
     }
 
     @Synchronized
-    private fun releaseDisplayResourcesOnly() {
-        val reader = imageReader
+    private fun cleanupResourcesInternal() {
+        val currentReader = imageReader
         imageReader = null
-        try {
-            reader?.setOnImageAvailableListener(null, null)
-            reader?.close()
-        } catch (ignored: Exception) {}
+        closeReaderQuietly(currentReader)
+
+        val readersToClose = retiredReaders.toList()
+        retiredReaders.clear()
+        readersToClose.forEach(::closeReaderQuietly)
 
         val vDisplay = virtualDisplay
         virtualDisplay = null
         try {
             vDisplay?.release()
-        } catch (ignored: Exception) {}
-    }
-
-    @Synchronized
-    private fun cleanupResourcesInternal() {
-        releaseDisplayResourcesOnly()
+        } catch (ignored: Exception) {
+        }
 
         val callback = registeredProjCallback
         registeredProjCallback = null
@@ -294,7 +360,8 @@ object ScreenCaptureEngine : ScreenCaptureProvider {
         try {
             if (callback != null) projection?.unregisterCallback(callback)
             projection?.stop()
-        } catch (ignored: Exception) {}
+        } catch (ignored: Exception) {
+        }
     }
 
     @Synchronized
