@@ -17,8 +17,10 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -81,7 +83,7 @@ class MonitoringController(
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
-                    // Coordinator survives exceptions and remains ready for subsequent commands
+                    // Coordinator survives exceptions and remains ready for subsequent commands.
                 }
             }
         }
@@ -97,7 +99,8 @@ class MonitoringController(
                 activeJob?.cancel()
                 try {
                     activeJob?.join()
-                } catch (ignored: Exception) {}
+                } catch (ignored: Exception) {
+                }
                 activeJob = null
 
                 // 3. Verify that this start session is still the latest (no intervening STOP)
@@ -126,7 +129,8 @@ class MonitoringController(
                 activeJob?.cancel()
                 try {
                     activeJob?.join()
-                } catch (ignored: Exception) {}
+                } catch (ignored: Exception) {
+                }
                 activeJob = null
 
                 // 4. Ensure Idle state is published
@@ -151,7 +155,7 @@ class MonitoringController(
     fun stopMonitoring() {
         val result = commandChannel.trySend(LifecycleCommand.Stop)
         if (result.isFailure) {
-            // Channel is closed/unavailable: enforce cancellation and cleanup directly
+            // Channel is closed/unavailable: enforce cancellation and cleanup directly.
             sessionCounter.incrementAndGet()
             activeJob?.cancel()
             _state.value = MonitoringState.Idle
@@ -160,7 +164,7 @@ class MonitoringController(
 
     /**
      * Sequential execution of Capture -> AI -> Delay.
-     * Uses [currentCoroutineContext().isActive] for coroutine-local cancellation state.
+     * Uses StateFlow readiness instead of polling a short fixed startup window.
      * Verifies [sessionId == sessionCounter.get()] before every action and state emission.
      */
     private suspend fun runMonitoringLoop(
@@ -169,17 +173,20 @@ class MonitoringController(
         settingsProvider: () -> CaptureSettings
     ) {
         try {
-            // Wait for capture provider to become ready
-            var waitAttempts = 0
-            while (!captureProvider.isReady.value && waitAttempts < 25 && currentCoroutineContext().isActive) {
-                if (sessionId != sessionCounter.get()) return
-                delay(100)
-                waitAttempts++
-            }
+            // Wait for the capture service/MediaProjection to become ready. This is
+            // event-driven through StateFlow, with a generous upper bound only to
+            // prevent a permanently stuck MonitoringState.Starting on startup failure.
+            val becameReady = withTimeoutOrNull(CAPTURE_READY_TIMEOUT_MS) {
+                captureProvider.isReady.first { ready ->
+                    ready || sessionId != sessionCounter.get() || !currentCoroutineContext().isActive
+                }
+            } == true
 
-            if (!captureProvider.isReady.value) {
-                if (sessionId == sessionCounter.get()) {
-                    _state.value = MonitoringState.Error("Screen capture session is not active. Please start monitoring again.")
+            if (!becameReady || sessionId != sessionCounter.get() || !currentCoroutineContext().isActive) {
+                if (sessionId == sessionCounter.get() && currentCoroutineContext().isActive) {
+                    _state.value = MonitoringState.Error(
+                        "Screen capture session did not become ready. Please start monitoring again."
+                    )
                 }
                 return
             }
@@ -195,6 +202,9 @@ class MonitoringController(
                 val capturedBitmap = when (captureResult) {
                     is CaptureResult.Success -> {
                         if (sessionId == sessionCounter.get()) {
+                            // StateFlow retains only the latest frame. The previous frame is
+                            // intentionally not recycled here because the UI may still be
+                            // rendering it; it becomes eligible for GC once no consumer holds it.
                             _latestBitmap.value = captureResult.bitmap
                             _lastCaptureTimestamp.value = System.currentTimeMillis()
                         }
@@ -237,7 +247,7 @@ class MonitoringController(
                 }
             }
         } catch (e: CancellationException) {
-            // CancellationException must propagate and never be swallowed
+            // CancellationException must propagate and never be swallowed.
             throw e
         } catch (e: Exception) {
             if (sessionId == sessionCounter.get()) {
@@ -259,5 +269,11 @@ class MonitoringController(
         _latestResult.value = null
         _analysisCount.value = 0
         _lastCaptureTimestamp.value = null
+    }
+
+    private companion object {
+        // Long enough for foreground-service + MediaProjection startup on a busy device,
+        // but finite so a failed initialization cannot leave the UI in Starting forever.
+        const val CAPTURE_READY_TIMEOUT_MS = 10_000L
     }
 }
