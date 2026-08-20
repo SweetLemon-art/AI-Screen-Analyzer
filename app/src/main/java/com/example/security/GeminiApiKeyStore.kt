@@ -30,6 +30,7 @@ class GeminiApiKeyStore(context: Context) {
 
     private val useJvmFallback = Build.FINGERPRINT.equals("robolectric", ignoreCase = true)
     private var jvmSecretKey: SecretKey? = null
+    private var keyStoreAvailable = false
 
     init {
         initKeyStore()
@@ -57,14 +58,15 @@ class GeminiApiKeyStore(context: Context) {
                 keyGenerator.init(spec)
                 keyGenerator.generateKey()
             }
+            keyStoreAvailable = true
         } catch (e: Exception) {
-            if (!useJvmFallback) {
-                throw IllegalStateException(
-                    "AndroidKeyStore is unavailable; refusing to store the API key without platform-backed key protection.",
-                    e
-                )
+            if (useJvmFallback) {
+                initJvmFallbackKey()
+            } else {
+                // Production must fail closed: never replace AndroidKeyStore with a key
+                // stored beside the ciphertext in SharedPreferences.
+                keyStoreAvailable = false
             }
-            initJvmFallbackKey()
         }
     }
 
@@ -90,11 +92,17 @@ class GeminiApiKeyStore(context: Context) {
                 )
                 .apply()
         }
+        keyStoreAvailable = true
     }
 
     private fun getSecretKey(): SecretKey {
+        if (!keyStoreAvailable) {
+            throw IllegalStateException("AndroidKeyStore is unavailable; secure API key storage is disabled.")
+        }
+
         if (useJvmFallback) {
-            return jvmSecretKey ?: throw IllegalStateException("Robolectric fallback secret key not initialized")
+            return jvmSecretKey
+                ?: throw IllegalStateException("Robolectric fallback secret key not initialized")
         }
 
         return try {
@@ -103,8 +111,9 @@ class GeminiApiKeyStore(context: Context) {
                 ?: throw IllegalStateException("KeyStore secret key entry not found")
             entry.secretKey
         } catch (e: Exception) {
+            keyStoreAvailable = false
             throw IllegalStateException(
-                "AndroidKeyStore key could not be loaded; refusing insecure fallback.",
+                "AndroidKeyStore key could not be loaded; secure API key storage is disabled.",
                 e
             )
         }
