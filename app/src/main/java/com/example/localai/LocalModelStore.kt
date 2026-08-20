@@ -21,7 +21,7 @@ class LocalModelStore(private val context: Context) {
         LocalModelValidator.validate(plan)
         val source = context.contentResolver.openInputStream(plan.sourceUri)
             ?: error("Unable to open selected model file")
-        return source.use { input -> import(plan, input) }
+        return import(plan, source)
     }
 
     /**
