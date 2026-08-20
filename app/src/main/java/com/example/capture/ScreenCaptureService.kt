@@ -50,6 +50,7 @@ class ScreenCaptureService : Service() {
     }
 
     private var mediaProjection: MediaProjection? = null
+    private var isCleaningUp = false
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -73,11 +74,11 @@ class ScreenCaptureService : Service() {
                     startForegroundNotification()
                     initMediaProjection(resultCode, data)
                 } else {
-                    stopSelf()
+                    stopSelfResult(startId)
                 }
             }
             ACTION_STOP -> {
-                cleanupAndStop()
+                cleanupAndStop(startId)
             }
         }
         return START_NOT_STICKY
@@ -123,10 +124,16 @@ class ScreenCaptureService : Service() {
         ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, foregroundServiceType)
     }
 
+    /**
+     * Starts a new MediaProjection session without ever leaving the previous projection alive.
+     * This makes repeated START commands idempotent from a resource/lifecycle perspective.
+     */
     private fun initMediaProjection(resultCode: Int, data: Intent) {
+        stopCurrentProjection()
+
         val projectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         val projection = projectionManager.getMediaProjection(resultCode, data)
-        this.mediaProjection = projection
+        mediaProjection = projection
 
         if (projection != null) {
             ScreenCaptureEngine.initialize(
@@ -137,29 +144,61 @@ class ScreenCaptureService : Service() {
                 }
             )
         } else {
+            mediaProjection = null
             stopSelf()
         }
     }
 
-    private fun cleanupAndStop() {
+    /**
+     * Stops only the active capture session. Does not call stopSelf(), so it is safe to use
+     * while replacing a projection during an ACTION_START without recursively destroying
+     * and recreating the service.
+     */
+    private fun stopCurrentProjection() {
         ScreenCaptureEngine.stop()
         try {
             mediaProjection?.stop()
-        } catch (e: Exception) {
-            e.printStackTrace()
+        } catch (_: Exception) {
+            // MediaProjection.stop() is idempotent enough for our lifecycle purposes; the
+            // engine cleanup is the authoritative resource cleanup path.
         }
         mediaProjection = null
+    }
+
+    private fun cleanupAndStop(startId: Int? = null) {
+        if (isCleaningUp) {
+            startId?.let(::stopSelfResult)
+            return
+        }
+        isCleaningUp = true
+        try {
+            stopCurrentProjection()
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+            } else {
+                @Suppress("DEPRECATION")
+                stopForeground(true)
+            }
+            if (startId != null) {
+                stopSelfResult(startId)
+            } else {
+                stopSelf()
+            }
+        } finally {
+            isCleaningUp = false
+        }
+    }
+
+    override fun onDestroy() {
+        // onDestroy can happen without ACTION_STOP (system/user/service termination), so
+        // resource cleanup must remain authoritative here as well.
+        stopCurrentProjection()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             stopForeground(STOP_FOREGROUND_REMOVE)
         } else {
             @Suppress("DEPRECATION")
             stopForeground(true)
         }
-        stopSelf()
-    }
-
-    override fun onDestroy() {
-        cleanupAndStop()
         super.onDestroy()
     }
 
