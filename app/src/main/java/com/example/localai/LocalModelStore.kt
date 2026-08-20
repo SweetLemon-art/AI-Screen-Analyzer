@@ -7,15 +7,23 @@ import java.io.InputStream
 import java.util.UUID
 
 class LocalModelStore(private val context: Context) {
+    private companion object {
+        const val TEMP_PREFIX = ".tmp-"
+        const val STALE_TEMP_AGE_MILLIS = 24 * 60 * 60 * 1000L
+    }
+
     private val rootDir: File by lazy {
         File(context.filesDir, "local_models").apply { mkdirs() }
     }
 
-    fun list(): List<LocalModel> = rootDir.listFiles()
-        ?.filter { it.isDirectory && !it.name.startsWith(".tmp-") }
-        ?.mapNotNull { readMetadata(it) }
-        ?.sortedBy { it.fileName.lowercase() }
-        ?: emptyList()
+    fun list(): List<LocalModel> {
+        cleanupStaleTempDirectories()
+        return rootDir.listFiles()
+            ?.filter { it.isDirectory && !it.name.startsWith(TEMP_PREFIX) }
+            ?.mapNotNull { readMetadata(it) }
+            ?.sortedBy { it.fileName.lowercase() }
+            ?: emptyList()
+    }
 
     fun import(plan: LocalModelImportPlan): LocalModel {
         LocalModelValidator.validate(plan)
@@ -33,7 +41,7 @@ class LocalModelStore(private val context: Context) {
 
         val safeName = plan.displayName.trim()
         val id = UUID.randomUUID().toString()
-        val tempDir = File(rootDir, ".tmp-$id")
+        val tempDir = File(rootDir, "$TEMP_PREFIX$id")
         val finalDir = File(rootDir, id)
         val modelFile = File(tempDir, safeName)
         val metadataFile = File(tempDir, "model.json")
@@ -78,6 +86,13 @@ class LocalModelStore(private val context: Context) {
         return File(dir, model.fileName).also {
             require(it.isFile) { "Model file not found" }
         }
+    }
+
+    private fun cleanupStaleTempDirectories() {
+        val cutoff = System.currentTimeMillis() - STALE_TEMP_AGE_MILLIS
+        rootDir.listFiles()
+            ?.filter { it.isDirectory && it.name.startsWith(TEMP_PREFIX) && it.lastModified() < cutoff }
+            ?.forEach { it.deleteRecursively() }
     }
 
     private fun readMetadata(dir: File): LocalModel? = runCatching {
