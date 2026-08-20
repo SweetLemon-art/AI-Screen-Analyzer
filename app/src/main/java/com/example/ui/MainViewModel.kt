@@ -243,7 +243,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun saveApiKey(apiKey: String) {
-        apiKeyStore.saveApiKey(apiKey)
+        val saved = apiKeyStore.saveApiKey(apiKey)
+        if (!saved) {
+            _hasApiKey.value = false
+            _maskedApiKey.value = ""
+            _testResult.value = ConnectionTestResult.Error(
+                "Failed to securely save the Gemini API key. Please try again."
+            )
+            return
+        }
+
         _hasApiKey.value = apiKeyStore.hasApiKey()
         _maskedApiKey.value = apiKeyStore.getMaskedApiKey()
         _testResult.value = null
