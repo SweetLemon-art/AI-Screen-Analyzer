@@ -81,7 +81,6 @@ fun ContextScreen(
             .padding(horizontal = 20.dp, vertical = 20.dp),
         verticalArrangement = Arrangement.spacedBy(18.dp)
     ) {
-        // Top Header
         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text(
                 text = "Analysis Context",
@@ -96,7 +95,6 @@ fun ContextScreen(
             )
         }
 
-        // Quick Presets Selector
         Card(
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(18.dp),
@@ -177,7 +175,6 @@ fun ContextScreen(
             }
         }
 
-        // Context Editor Form
         Card(
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(18.dp),
@@ -207,7 +204,6 @@ fun ContextScreen(
                     )
                 }
 
-                // Name field
                 OutlinedTextField(
                     value = nameText,
                     onValueChange = { nameText = it },
@@ -224,7 +220,6 @@ fun ContextScreen(
                     )
                 )
 
-                // Instructions field
                 OutlinedTextField(
                     value = instructionsText,
                     onValueChange = { instructionsText = it },
@@ -242,7 +237,6 @@ fun ContextScreen(
                     )
                 )
 
-                // Language Selector
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
@@ -262,28 +256,30 @@ fun ContextScreen(
                         )
                     }
 
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        languages.take(4).forEach { lang ->
-                            val isSelected = languageText.equals(lang, ignoreCase = true)
-                            Box(
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .testTag("lang_chip_$lang")
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(if (isSelected) NeonVioletLight else Slate800)
-                                    .clickable { languageText = lang }
-                                    .padding(vertical = 8.dp),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    text = lang,
-                                    fontSize = 11.sp,
-                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
-                                    color = if (isSelected) Color(0xFF070B14) else Color.White
-                                )
+                    languages.chunked(4).forEach { languageRow ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            languageRow.forEach { lang ->
+                                val isSelected = languageText.equals(lang, ignoreCase = true)
+                                Box(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .testTag("lang_chip_$lang")
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(if (isSelected) NeonVioletLight else Slate800)
+                                        .clickable { languageText = lang }
+                                        .padding(vertical = 8.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = lang,
+                                        fontSize = 11.sp,
+                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                        color = if (isSelected) Color(0xFF070B14) else Color.White
+                                    )
+                                }
                             }
                         }
                     }
@@ -291,7 +287,6 @@ fun ContextScreen(
 
                 Spacer(modifier = Modifier.height(6.dp))
 
-                // Save button
                 Button(
                     onClick = {
                         viewModel.saveAndSelectContext(
