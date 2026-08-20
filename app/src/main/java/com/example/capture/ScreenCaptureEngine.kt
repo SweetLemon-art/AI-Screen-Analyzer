@@ -272,7 +272,7 @@ object ScreenCaptureEngine : ScreenCaptureProvider {
             }
 
             if (reader == null) {
-                return@withContext CaptureResult.Error("Screen capture session is not active or permission was revoked.")
+                return@withLock CaptureResult.Error("Screen capture session is not active or permission was revoked.")
             }
 
             try {
@@ -284,7 +284,7 @@ object ScreenCaptureEngine : ScreenCaptureProvider {
 
                 if (immediateImage != null) {
                     val bitmap = ImageProcessor.convertImageToBitmap(immediateImage)
-                    return@withContext if (bitmap != null) {
+                    return@withLock if (bitmap != null) {
                         CaptureResult.Success(bitmap)
                     } else {
                         CaptureResult.Error("Failed to convert captured frame buffer to Bitmap.")
