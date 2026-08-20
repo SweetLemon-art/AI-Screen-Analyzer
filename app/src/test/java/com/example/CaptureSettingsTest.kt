@@ -5,7 +5,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-class CaptureSettingsTest {
+class CaptureSettingsBoundsTest {
 
     @Test
     fun `safe settings clamp delay to one second minimum`() {
