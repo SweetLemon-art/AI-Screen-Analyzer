@@ -34,9 +34,10 @@ import kotlin.coroutines.resume
  * - Exactly ONE VirtualDisplay is created for each MediaProjection session.
  * - [captureSingleFrame] never creates or recreates a VirtualDisplay.
  * - Android 14+ captured-content resize is handled with VirtualDisplay.resize()/setSurface().
- * - ImageReader replacement is deferred until active captures finish, preventing close/use races.
+ * - ImageReader replacement and session cleanup are deferred until active captures finish,
+ *   preventing close/use races.
  * - Retired readers keep their listener until the owning capture finishes, preventing a resize
- *   callback from racing with listener registration on the old reader.
+ *   or stop callback from racing with listener use on the old reader.
  * - Callbacks are explicitly bound to session generations to prevent stale callback pollution.
  * - Callbacks are unregistered before MediaProjection is stopped.
  * - [stop] is strictly idempotent and safe when called repeatedly.
@@ -169,7 +170,7 @@ object ScreenCaptureEngine : ScreenCaptureProvider {
             virtualDisplay = vDisplay
             generation == sessionGeneration.get()
         } catch (e: Exception) {
-            imageReader?.close()
+            imageReader?.let(::closeReaderQuietly)
             imageReader = null
             false
         }
@@ -208,9 +209,8 @@ object ScreenCaptureEngine : ScreenCaptureProvider {
             screenHeight = height
             imageReader = newReader
 
-            // Do not clear oldReader's listener here. A capture can have obtained the old
-            // reader just before this resize callback. Retaining the listener until that
-            // capture exits prevents a listener-registration/close race.
+            // Do not close or clear oldReader while a capture may still own it.
+            // Retain it until activeCaptureCount reaches zero.
             if (activeCaptureCount.get() == 0) {
                 closeReaderQuietly(oldReader)
             } else {
@@ -225,6 +225,7 @@ object ScreenCaptureEngine : ScreenCaptureProvider {
         }
     }
 
+    @Synchronized
     private fun closeRetiredReadersIfIdle() {
         if (activeCaptureCount.get() != 0) return
         if (retiredReaders.isEmpty()) return
@@ -245,15 +246,14 @@ object ScreenCaptureEngine : ScreenCaptureProvider {
         }
     }
 
+    @Synchronized
     private fun handleSessionStop(callbackGen: Long) {
-        synchronized(this) {
-            if (callbackGen != sessionGeneration.get()) return
-            _isReady.value = false
-            cleanupResourcesInternal()
-            val callback = onProjectionStopCallback
-            onProjectionStopCallback = null
-            callback?.invoke()
-        }
+        if (callbackGen != sessionGeneration.get()) return
+        _isReady.value = false
+        cleanupResourcesInternal()
+        val callback = onProjectionStopCallback
+        onProjectionStopCallback = null
+        callback?.invoke()
     }
 
     override suspend fun captureSingleFrame(): CaptureResult = withContext(Dispatchers.Default) {
@@ -342,11 +342,17 @@ object ScreenCaptureEngine : ScreenCaptureProvider {
     private fun cleanupResourcesInternal() {
         val currentReader = imageReader
         imageReader = null
-        closeReaderQuietly(currentReader)
 
-        val readersToClose = retiredReaders.toList()
-        retiredReaders.clear()
-        readersToClose.forEach(::closeReaderQuietly)
+        // A capture may already own currentReader. Retire it instead of closing it
+        // immediately; the capture's finally block will close it once ownership ends.
+        if (currentReader != null) {
+            if (activeCaptureCount.get() == 0) {
+                closeReaderQuietly(currentReader)
+            } else {
+                retiredReaders.add(currentReader)
+            }
+        }
+        closeRetiredReadersIfIdle()
 
         val vDisplay = virtualDisplay
         virtualDisplay = null
