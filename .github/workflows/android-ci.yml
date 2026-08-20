@@ -1,8 +1,10 @@
 name: Android CI
 
 on:
-  # CI is intentionally NOT triggered by normal commits/pushes.
-  # Run it manually from GitHub Actions when verification is needed.
+  # Verify every change merged/pushed to main, while retaining PR and manual runs.
+  push:
+    branches:
+      - main
   workflow_dispatch:
   pull_request:
     branches:
