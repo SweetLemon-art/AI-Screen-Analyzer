@@ -3,6 +3,7 @@ package com.example.localai
 import android.content.Context
 import org.json.JSONObject
 import java.io.File
+import java.io.InputStream
 import java.util.UUID
 
 class LocalModelStore(private val context: Context) {
@@ -20,6 +21,15 @@ class LocalModelStore(private val context: Context) {
         LocalModelValidator.validate(plan)
         val source = context.contentResolver.openInputStream(plan.sourceUri)
             ?: error("Unable to open selected model file")
+        return source.use { input -> import(plan, input) }
+    }
+
+    /**
+     * Storage-only import entry point used by JVM tests so they do not depend on a
+     * platform ContentResolver implementation for a synthetic file:// Uri.
+     */
+    internal fun import(plan: LocalModelImportPlan, source: InputStream): LocalModel {
+        LocalModelValidator.validate(plan)
 
         val safeName = plan.displayName.trim()
         val id = UUID.randomUUID().toString()
@@ -69,17 +79,22 @@ class LocalModelStore(private val context: Context) {
             id = json.getString("id"),
             fileName = json.getString("fileName"),
             modelType = ModelType.valueOf(json.optString("modelType", "UNKNOWN")),
-            configuration = LocalModelConfiguration(
-                maxTokens = json.getJSONObject("configuration").getInt("maxTokens"),
-                topK = json.getJSONObject("configuration").getInt("topK"),
-                topP = json.getJSONObject("configuration").getDouble("topP"),
-                temperature = json.getJSONObject("configuration").getDouble("temperature")
-            ),
+            configuration = json.getJSONObject("configuration").let { c ->
+                LocalModelConfiguration(
+                    maxTokens = c.getInt("maxTokens"),
+                    topK = c.getInt("topK"),
+                    topP = c.getDouble("topP"),
+                    temperature = c.getDouble("temperature")
+                )
+            },
             capabilities = json.getJSONObject("capabilities").let { c ->
                 ModelCapabilities(
-                    image = c.optBoolean("image"), audio = c.optBoolean("audio"),
-                    tinyGarden = c.optBoolean("tinyGarden"), mobileActions = c.optBoolean("mobileActions"),
-                    thinking = c.optBoolean("thinking"), speculativeDecoding = c.optBoolean("speculativeDecoding")
+                    image = c.optBoolean("image"),
+                    audio = c.optBoolean("audio"),
+                    tinyGarden = c.optBoolean("tinyGarden"),
+                    mobileActions = c.optBoolean("mobileActions"),
+                    thinking = c.optBoolean("thinking"),
+                    speculativeDecoding = c.optBoolean("speculativeDecoding")
                 )
             },
             accelerator = Accelerator.valueOf(json.optString("accelerator", "CPU")),
