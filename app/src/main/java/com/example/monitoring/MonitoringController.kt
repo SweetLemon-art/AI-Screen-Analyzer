@@ -40,7 +40,9 @@ private sealed interface LifecycleCommand {
  * Single lifecycle coordinator managing start/stop serialization and monitoring execution.
  *
  * Architecture:
- * UI/API -> single lifecycle command stream (Channel) -> sequential execution -> exactly ONE active monitoring Job.
+ * UI/API -> single lifecycle command stream -> sequential execution -> exactly ONE active monitoring Job.
+ * The command stream is conflated so a burst of UI commands cannot build an unbounded backlog;
+ * the latest requested lifecycle state wins.
  */
 class MonitoringController(
     private val visionAnalyzer: VisionAnalyzer,
@@ -64,19 +66,19 @@ class MonitoringController(
 
     private var activeJob: Job? = null
     private val sessionCounter = AtomicLong(0)
-    private val commandChannel = Channel<LifecycleCommand>(Channel.UNLIMITED)
+    private val commandChannel = Channel<LifecycleCommand>(Channel.CONFLATED)
 
     val isMonitoring: Boolean
         get() = when (_state.value) {
             is MonitoringState.Capturing,
             is MonitoringState.Analyzing,
             is MonitoringState.Waiting,
-            is MonitoringState.Starting -> true
+            is MonitoringState.Starting,
+            is MonitoringState.Stopping -> true
             else -> false
         }
 
     init {
-        // Dedicated Single Lifecycle Coordinator
         coroutineScope.launch {
             for (command in commandChannel) {
                 try {
@@ -84,7 +86,9 @@ class MonitoringController(
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
-                    // Coordinator survives exceptions and remains ready for subsequent commands.
+                    _state.value = MonitoringState.Error(
+                        e.localizedMessage ?: "Unexpected monitoring lifecycle error"
+                    )
                 }
             }
         }
@@ -98,7 +102,8 @@ class MonitoringController(
                 activeJob?.cancel()
                 try {
                     activeJob?.join()
-                } catch (ignored: Exception) {
+                } catch (_: CancellationException) {
+                    // The coordinator itself remains alive; the monitoring job was intentionally cancelled.
                 }
                 activeJob = null
 
@@ -114,12 +119,13 @@ class MonitoringController(
 
             is LifecycleCommand.Stop -> {
                 sessionCounter.incrementAndGet()
-                _state.value = MonitoringState.Idle
+                _state.value = MonitoringState.Stopping
 
                 activeJob?.cancel()
                 try {
                     activeJob?.join()
-                } catch (ignored: Exception) {
+                } catch (_: CancellationException) {
+                    // Cancellation of the monitoring child is expected during STOP.
                 }
                 activeJob = null
                 _state.value = MonitoringState.Idle
@@ -138,6 +144,7 @@ class MonitoringController(
         val result = commandChannel.trySend(LifecycleCommand.Stop)
         if (result.isFailure) {
             sessionCounter.incrementAndGet()
+            _state.value = MonitoringState.Stopping
             activeJob?.cancel()
             _state.value = MonitoringState.Idle
         }
@@ -194,14 +201,9 @@ class MonitoringController(
                         }
                     }
 
-                    // Keep the UI responsive by retaining a bounded-size preview instead of
-                    // the full-resolution capture. If the capture is already small enough,
-                    // ImageProcessor returns the same object and ownership remains unchanged.
                     previewBitmap = try {
                         ImageProcessor.createPreviewBitmap(analysisBitmap)
-                    } catch (e: Exception) {
-                        // Preview is optional; never lose the analysis frame because preview
-                        // allocation failed. The full bitmap remains owned by this controller.
+                    } catch (_: Exception) {
                         analysisBitmap
                     }
 
@@ -234,10 +236,6 @@ class MonitoringController(
                         delay(1000L)
                     }
                 } finally {
-                    // Never recycle the bitmap still exposed to Compose as the preview.
-                    // Android explicitly warns that recycling a bitmap still referenced by
-                    // rendering code is unsafe. The bounded preview can be reclaimed by GC
-                    // when the StateFlow/UI no longer references it.
                     if (analysisBitmap != null && analysisBitmap !== previewBitmap && !analysisBitmap.isRecycled) {
                         analysisBitmap.recycle()
                     }
@@ -252,7 +250,8 @@ class MonitoringController(
         } finally {
             if (sessionId == sessionCounter.get() &&
                 _state.value !is MonitoringState.Idle &&
-                _state.value !is MonitoringState.Error
+                _state.value !is MonitoringState.Error &&
+                _state.value !is MonitoringState.Stopping
             ) {
                 _state.value = MonitoringState.Idle
             }
