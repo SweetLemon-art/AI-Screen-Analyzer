@@ -41,7 +41,7 @@ class GeminiApiKeyStoreSecurityTest {
         assertTrue(prefs.contains("enc_iv"))
         assertTrue(prefs.contains("enc_data"))
         assertTrue(prefs.contains("enc_jvm_fallback_k"))
-        assertFalse(prefs.getString("enc_data", "").contains("test-gemini-api-key-1234"))
+        assertFalse(prefs.getString("enc_data", "").orEmpty().contains("test-gemini-api-key-1234"))
     }
 
     @Test
