@@ -72,7 +72,7 @@ class ScreenCaptureService : Service() {
 
                 if (resultCode != 0 && data != null) {
                     startForegroundNotification()
-                    initMediaProjection(resultCode, data)
+                    initMediaProjection(resultCode, data, startId)
                 } else {
                     stopSelfResult(startId)
                 }
@@ -128,24 +128,34 @@ class ScreenCaptureService : Service() {
      * Starts a new MediaProjection session without ever leaving the previous projection alive.
      * This makes repeated START commands idempotent from a resource/lifecycle perspective.
      */
-    private fun initMediaProjection(resultCode: Int, data: Intent) {
+    private fun initMediaProjection(resultCode: Int, data: Intent, startId: Int) {
         stopCurrentProjection()
 
-        val projectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-        val projection = projectionManager.getMediaProjection(resultCode, data)
-        mediaProjection = projection
+        try {
+            val projectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+            val projection = projectionManager.getMediaProjection(resultCode, data)
+            mediaProjection = projection
 
-        if (projection != null) {
-            ScreenCaptureEngine.initialize(
-                context = applicationContext,
-                projection = projection,
-                onStopCallback = {
-                    stopSelf()
-                }
-            )
-        } else {
+            if (projection != null) {
+                ScreenCaptureEngine.initialize(
+                    context = applicationContext,
+                    projection = projection,
+                    onStopCallback = {
+                        stopSelfResult(startId)
+                    }
+                )
+            } else {
+                mediaProjection = null
+                stopSelfResult(startId)
+            }
+        } catch (_: SecurityException) {
             mediaProjection = null
-            stopSelf()
+            ScreenCaptureEngine.stop()
+            stopSelfResult(startId)
+        } catch (_: Exception) {
+            mediaProjection = null
+            ScreenCaptureEngine.stop()
+            stopSelfResult(startId)
         }
     }
 
