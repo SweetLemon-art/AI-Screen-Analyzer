@@ -1,19 +1,14 @@
-<?xml version="1.0" encoding="utf-8"?><!--
-   Sample data extraction rules file; uncomment and customize as necessary.
-   See https://developer.android.com/about/versions/12/backup-restore#xml-changes
-   for details.
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    The Gemini API key is encrypted with Android Keystore, but its ciphertext and IV
+    are still stored in SharedPreferences. Exclude that preference file from cloud
+    backup and device transfer so encrypted credentials cannot be restored elsewhere.
 -->
 <data-extraction-rules>
     <cloud-backup>
-        <!-- TODO: Use <include> and <exclude> to control what is backed up.
-        <include .../>
-        <exclude .../>
-        -->
+        <exclude domain="sharedpref" path="ai_screen_analyzer_sec_prefs" />
     </cloud-backup>
-    <!--
     <device-transfer>
-        <include .../>
-        <exclude .../>
+        <exclude domain="sharedpref" path="ai_screen_analyzer_sec_prefs" />
     </device-transfer>
-    -->
 </data-extraction-rules>
