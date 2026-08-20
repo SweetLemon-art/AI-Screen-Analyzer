@@ -140,8 +140,14 @@ class GeminiApiKeyStore(context: Context) {
             prefs.edit()
                 .putString(PREF_KEY_IV, encodedIv)
                 .putString(PREF_KEY_DATA, encodedCiphertext)
-                .remove(PREF_KEY_JVM_FALLBACK_KEY)
                 .apply()
+
+            // If an older production build left a JVM fallback key behind, remove it only
+            // after a successful AndroidKeyStore write. Robolectric must retain its test key
+            // because it is needed to decrypt persisted test data across store instances.
+            if (!useJvmFallback) {
+                prefs.edit().remove(PREF_KEY_JVM_FALLBACK_KEY).apply()
+            }
             true
         } catch (e: Exception) {
             false
