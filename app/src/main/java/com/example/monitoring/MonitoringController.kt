@@ -8,6 +8,7 @@ import com.example.capture.ScreenCaptureEngine
 import com.example.capture.ScreenCaptureProvider
 import com.example.data.AnalysisContext
 import com.example.data.CaptureSettings
+import com.example.image.ImageProcessor
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -92,10 +93,8 @@ class MonitoringController(
     private suspend fun handleLifecycleCommand(command: LifecycleCommand) {
         when (command) {
             is LifecycleCommand.Start -> {
-                // 1. Invalidate previous session
                 val newSessionId = sessionCounter.incrementAndGet()
 
-                // 2. Stop/cancel any existing monitoring Job & await completion
                 activeJob?.cancel()
                 try {
                     activeJob?.join()
@@ -103,15 +102,10 @@ class MonitoringController(
                 }
                 activeJob = null
 
-                // 3. Verify that this start session is still the latest (no intervening STOP)
-                if (newSessionId != sessionCounter.get()) {
-                    return
-                }
+                if (newSessionId != sessionCounter.get()) return
 
-                // 4. Update state to starting
                 _state.value = MonitoringState.Starting
 
-                // 5. Create exactly ONE monitoring Job
                 val job = coroutineScope.launch {
                     runMonitoringLoop(newSessionId, command.contextProvider, command.settingsProvider)
                 }
@@ -119,29 +113,20 @@ class MonitoringController(
             }
 
             is LifecycleCommand.Stop -> {
-                // 1. Invalidate session immediately
                 sessionCounter.incrementAndGet()
-
-                // 2. Set Idle immediately
                 _state.value = MonitoringState.Idle
 
-                // 3. Cancel active monitoring Job & await completion
                 activeJob?.cancel()
                 try {
                     activeJob?.join()
                 } catch (ignored: Exception) {
                 }
                 activeJob = null
-
-                // 4. Ensure Idle state is published
                 _state.value = MonitoringState.Idle
             }
         }
     }
 
-    /**
-     * Enqueues START to the single lifecycle coordinator.
-     */
     fun startMonitoring(
         contextProvider: () -> AnalysisContext,
         settingsProvider: () -> CaptureSettings
@@ -149,13 +134,9 @@ class MonitoringController(
         commandChannel.trySend(LifecycleCommand.Start(contextProvider, settingsProvider))
     }
 
-    /**
-     * Enqueues STOP to the single lifecycle coordinator.
-     */
     fun stopMonitoring() {
         val result = commandChannel.trySend(LifecycleCommand.Stop)
         if (result.isFailure) {
-            // Channel is closed/unavailable: enforce cancellation and cleanup directly.
             sessionCounter.incrementAndGet()
             activeJob?.cancel()
             _state.value = MonitoringState.Idle
@@ -164,8 +145,12 @@ class MonitoringController(
 
     /**
      * Sequential execution of Capture -> AI -> Delay.
-     * Uses StateFlow readiness instead of polling a short fixed startup window.
-     * Verifies [sessionId == sessionCounter.get()] before every action and state emission.
+     *
+     * Bitmap ownership rule:
+     * - captureProvider transfers ownership of a successful capture bitmap here.
+     * - A downscaled preview is retained for the UI when possible.
+     * - The full-resolution analysis bitmap is recycled after AI processing finishes,
+     *   including cancellation/error paths, unless it is also the UI preview bitmap.
      */
     private suspend fun runMonitoringLoop(
         sessionId: Long,
@@ -173,9 +158,6 @@ class MonitoringController(
         settingsProvider: () -> CaptureSettings
     ) {
         try {
-            // Wait for the capture service/MediaProjection to become ready. This is
-            // event-driven through StateFlow, with a generous upper bound only to
-            // prevent a permanently stuck MonitoringState.Starting on startup failure.
             val becameReady = withTimeoutOrNull(CAPTURE_READY_TIMEOUT_MS) {
                 captureProvider.isReady.first { ready ->
                     ready || sessionId != sessionCounter.get() || !currentCoroutineContext().isActive
@@ -192,62 +174,76 @@ class MonitoringController(
             }
 
             while (currentCoroutineContext().isActive && sessionId == sessionCounter.get()) {
-                // 1. CAPTURE SCREEN
                 if (sessionId != sessionCounter.get() || !currentCoroutineContext().isActive) return
                 _state.value = MonitoringState.Capturing
 
-                val captureResult = captureProvider.captureSingleFrame()
-                if (sessionId != sessionCounter.get() || !currentCoroutineContext().isActive) return
+                var analysisBitmap: Bitmap? = null
+                var previewBitmap: Bitmap? = null
 
-                val capturedBitmap = when (captureResult) {
-                    is CaptureResult.Success -> {
-                        if (sessionId == sessionCounter.get()) {
-                            // StateFlow retains only the latest frame. The previous frame is
-                            // intentionally not recycled here because the UI may still be
-                            // rendering it; it becomes eligible for GC once no consumer holds it.
-                            _latestBitmap.value = captureResult.bitmap
-                            _lastCaptureTimestamp.value = System.currentTimeMillis()
-                        }
-                        captureResult.bitmap
-                    }
-                    is CaptureResult.Error -> {
-                        if (sessionId == sessionCounter.get()) {
-                            _state.value = MonitoringState.Error(captureResult.message)
-                        }
-                        return
-                    }
-                }
-
-                // 2. PREPARE CONTEXT & SETTINGS
-                if (sessionId != sessionCounter.get() || !currentCoroutineContext().isActive) return
-                val currentContext = contextProvider()
-                val currentSettings = settingsProvider()
-                _state.value = MonitoringState.Analyzing(startTimeMs = System.currentTimeMillis())
-
-                // 3. AI PROCESSING (Wait for complete response)
-                val result = visionAnalyzer.analyze(
-                    bitmap = capturedBitmap,
-                    context = currentContext,
-                    settings = currentSettings
-                )
-
-                if (sessionId != sessionCounter.get() || !currentCoroutineContext().isActive) return
-                _latestResult.value = result
-                _analysisCount.value += 1
-
-                // 4. DELAY TIMER (Strictly starts AFTER AI completes)
-                val delaySeconds = currentSettings.delaySeconds.coerceIn(1, 600)
-                for (remaining in delaySeconds downTo 1) {
+                try {
+                    val captureResult = captureProvider.captureSingleFrame()
                     if (sessionId != sessionCounter.get() || !currentCoroutineContext().isActive) return
-                    _state.value = MonitoringState.Waiting(
-                        remainingSeconds = remaining,
-                        totalSeconds = delaySeconds
+
+                    analysisBitmap = when (captureResult) {
+                        is CaptureResult.Success -> captureResult.bitmap
+                        is CaptureResult.Error -> {
+                            if (sessionId == sessionCounter.get()) {
+                                _state.value = MonitoringState.Error(captureResult.message)
+                            }
+                            return
+                        }
+                    }
+
+                    // Keep the UI responsive by retaining a bounded-size preview instead of
+                    // the full-resolution capture. If the capture is already small enough,
+                    // ImageProcessor returns the same object and ownership remains unchanged.
+                    previewBitmap = try {
+                        ImageProcessor.createPreviewBitmap(analysisBitmap)
+                    } catch (e: Exception) {
+                        // Preview is optional; never lose the analysis frame because preview
+                        // allocation failed. The full bitmap remains owned by this controller.
+                        analysisBitmap
+                    }
+
+                    if (sessionId != sessionCounter.get() || !currentCoroutineContext().isActive) return
+                    _latestBitmap.value = previewBitmap
+                    _lastCaptureTimestamp.value = System.currentTimeMillis()
+
+                    if (sessionId != sessionCounter.get() || !currentCoroutineContext().isActive) return
+                    val currentContext = contextProvider()
+                    val currentSettings = settingsProvider()
+                    _state.value = MonitoringState.Analyzing(startTimeMs = System.currentTimeMillis())
+
+                    val result = visionAnalyzer.analyze(
+                        bitmap = analysisBitmap,
+                        context = currentContext,
+                        settings = currentSettings
                     )
-                    delay(1000L)
+
+                    if (sessionId != sessionCounter.get() || !currentCoroutineContext().isActive) return
+                    _latestResult.value = result
+                    _analysisCount.value += 1
+
+                    val delaySeconds = currentSettings.delaySeconds.coerceIn(1, 600)
+                    for (remaining in delaySeconds downTo 1) {
+                        if (sessionId != sessionCounter.get() || !currentCoroutineContext().isActive) return
+                        _state.value = MonitoringState.Waiting(
+                            remainingSeconds = remaining,
+                            totalSeconds = delaySeconds
+                        )
+                        delay(1000L)
+                    }
+                } finally {
+                    // Never recycle the bitmap still exposed to Compose as the preview.
+                    // Android explicitly warns that recycling a bitmap still referenced by
+                    // rendering code is unsafe. The bounded preview can be reclaimed by GC
+                    // when the StateFlow/UI no longer references it.
+                    if (analysisBitmap != null && analysisBitmap !== previewBitmap && !analysisBitmap.isRecycled) {
+                        analysisBitmap.recycle()
+                    }
                 }
             }
         } catch (e: CancellationException) {
-            // CancellationException must propagate and never be swallowed.
             throw e
         } catch (e: Exception) {
             if (sessionId == sessionCounter.get()) {
@@ -272,8 +268,6 @@ class MonitoringController(
     }
 
     private companion object {
-        // Long enough for foreground-service + MediaProjection startup on a busy device,
-        // but finite so a failed initialization cannot leave the UI in Starting forever.
         const val CAPTURE_READY_TIMEOUT_MS = 10_000L
     }
 }
