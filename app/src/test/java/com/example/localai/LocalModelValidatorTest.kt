@@ -21,6 +21,16 @@ class LocalModelValidatorTest {
         assertThrows(IllegalArgumentException::class.java) {
             LocalModelValidator.validateFileName("../model.litertlm")
         }
+        assertThrows(IllegalArgumentException::class.java) {
+            LocalModelValidator.validateFileName("folder\\model.litertlm")
+        }
+    }
+
+    @Test
+    fun rejectsBlankFileName() {
+        assertThrows(IllegalArgumentException::class.java) {
+            LocalModelValidator.validateFileName("   ")
+        }
     }
 
     @Test
