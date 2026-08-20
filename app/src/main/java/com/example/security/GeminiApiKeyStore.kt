@@ -2,6 +2,7 @@ package com.example.security
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
@@ -13,10 +14,12 @@ import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
 /**
- * Secure storage for the user-provided Gemini API Key.
- * Uses hardware-backed Android KeyStore AES-256 GCM encryption on devices,
- * with graceful JVM test compatibility for Robolectric.
- * The raw API key is NEVER stored in plaintext.
+ * Secure storage for the user-provided Gemini API key.
+ *
+ * Production Android always uses AndroidKeyStore AES-256 GCM. The JVM fallback is
+ * enabled only under Robolectric so local JVM tests can exercise the storage class
+ * without weakening production credential storage.
+ * The raw API key is never stored in plaintext.
  */
 class GeminiApiKeyStore(context: Context) {
 
@@ -25,7 +28,7 @@ class GeminiApiKeyStore(context: Context) {
         Context.MODE_PRIVATE
     )
 
-    private var useJvmFallback = false
+    private val useJvmFallback = Build.FINGERPRINT.equals("robolectric", ignoreCase = true)
     private var jvmSecretKey: SecretKey? = null
 
     init {
@@ -55,53 +58,67 @@ class GeminiApiKeyStore(context: Context) {
                 keyGenerator.generateKey()
             }
         } catch (e: Exception) {
-            // AndroidKeyStore unavailable (e.g. running in local Robolectric JVM test environment)
-            useJvmFallback = true
+            if (!useJvmFallback) {
+                throw IllegalStateException(
+                    "AndroidKeyStore is unavailable; refusing to store the API key without platform-backed key protection.",
+                    e
+                )
+            }
             initJvmFallbackKey()
         }
     }
 
     private fun initJvmFallbackKey() {
+        check(useJvmFallback) { "JVM fallback is restricted to Robolectric tests." }
+
         val storedKeyBase64 = prefs.getString(PREF_KEY_JVM_FALLBACK_KEY, null)
         if (storedKeyBase64 != null) {
             val keyBytes = Base64.decode(storedKeyBase64, Base64.NO_WRAP)
+            require(keyBytes.size == JVM_AES_KEY_SIZE_BYTES) {
+                "Invalid Robolectric fallback key length."
+            }
             jvmSecretKey = SecretKeySpec(keyBytes, "AES")
         } else {
             val keyGen = KeyGenerator.getInstance("AES")
-            keyGen.init(256)
+            keyGen.init(JVM_AES_KEY_SIZE_BITS)
             val generatedKey = keyGen.generateKey()
             jvmSecretKey = generatedKey
             prefs.edit()
-                .putString(PREF_KEY_JVM_FALLBACK_KEY, Base64.encodeToString(generatedKey.encoded, Base64.NO_WRAP))
+                .putString(
+                    PREF_KEY_JVM_FALLBACK_KEY,
+                    Base64.encodeToString(generatedKey.encoded, Base64.NO_WRAP)
+                )
                 .apply()
         }
     }
 
     private fun getSecretKey(): SecretKey {
         if (useJvmFallback) {
-            return jvmSecretKey ?: throw IllegalStateException("Fallback secret key not initialized")
+            return jvmSecretKey ?: throw IllegalStateException("Robolectric fallback secret key not initialized")
         }
+
         return try {
             val keyStore = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
             val entry = keyStore.getEntry(KEY_ALIAS, null) as? KeyStore.SecretKeyEntry
                 ?: throw IllegalStateException("KeyStore secret key entry not found")
             entry.secretKey
         } catch (e: Exception) {
-            useJvmFallback = true
-            initJvmFallbackKey()
-            jvmSecretKey!!
+            throw IllegalStateException(
+                "AndroidKeyStore key could not be loaded; refusing insecure fallback.",
+                e
+            )
         }
     }
 
     @Synchronized
-    fun saveApiKey(apiKey: String) {
+    fun saveApiKey(apiKey: String): Boolean {
         val trimmed = apiKey.trim()
         if (trimmed.isEmpty()) {
             clearApiKey()
-            return
+            return true
         }
 
-        try {
+        return try {
             val secretKey = getSecretKey()
             val cipher = Cipher.getInstance(TRANSFORMATION)
             cipher.init(Cipher.ENCRYPT_MODE, secretKey)
@@ -114,9 +131,11 @@ class GeminiApiKeyStore(context: Context) {
             prefs.edit()
                 .putString(PREF_KEY_IV, encodedIv)
                 .putString(PREF_KEY_DATA, encodedCiphertext)
+                .remove(PREF_KEY_JVM_FALLBACK_KEY)
                 .apply()
+            true
         } catch (e: Exception) {
-            // Logging or handling encryption failure cleanly
+            false
         }
     }
 
@@ -137,7 +156,6 @@ class GeminiApiKeyStore(context: Context) {
             val decryptedBytes = cipher.doFinal(ciphertext)
             String(decryptedBytes, Charsets.UTF_8).trim()
         } catch (e: Exception) {
-            // Decryption failed or data corrupted
             null
         }
     }
@@ -147,6 +165,7 @@ class GeminiApiKeyStore(context: Context) {
         prefs.edit()
             .remove(PREF_KEY_IV)
             .remove(PREF_KEY_DATA)
+            .remove(PREF_KEY_JVM_FALLBACK_KEY)
             .apply()
     }
 
@@ -171,5 +190,7 @@ class GeminiApiKeyStore(context: Context) {
         private const val PREF_KEY_IV = "enc_iv"
         private const val PREF_KEY_DATA = "enc_data"
         private const val PREF_KEY_JVM_FALLBACK_KEY = "enc_jvm_fallback_k"
+        private const val JVM_AES_KEY_SIZE_BITS = 256
+        private const val JVM_AES_KEY_SIZE_BYTES = JVM_AES_KEY_SIZE_BITS / 8
     }
 }
