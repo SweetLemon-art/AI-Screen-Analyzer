@@ -108,7 +108,9 @@ object ScreenCaptureEngine : ScreenCaptureProvider {
         try {
             projection.registerCallback(projCallback, mainHandler)
         } catch (e: Exception) {
+            val failureCallback = onProjectionStopCallback
             stop()
+            failureCallback?.invoke()
             return
         }
 
@@ -133,7 +135,11 @@ object ScreenCaptureEngine : ScreenCaptureProvider {
 
         val success = setupSessionResources(projection, currentGen)
         _isReady.value = success
-        if (!success) stop()
+        if (!success) {
+            val failureCallback = onProjectionStopCallback
+            stop()
+            failureCallback?.invoke()
+        }
     }
 
     @Synchronized
