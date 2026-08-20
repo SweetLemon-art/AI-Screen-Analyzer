@@ -27,7 +27,7 @@ class LocalModelRepositoryTest {
         )
 
         try {
-            val imported = store.import(plan)
+            val imported = store.import(plan, source.inputStream())
 
             assertEquals(listOf(imported.id), store.list().map { it.id })
             assertEquals("test model payload", store.modelFile(imported.id).readText())
