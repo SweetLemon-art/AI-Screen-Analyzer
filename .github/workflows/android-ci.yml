@@ -1,9 +1,11 @@
 name: Android CI
 
 on:
-  # Keep verification opt-in: PRs and manual runs only.
-  # Direct pushes to main do not automatically start Actions.
+  # Verify pull requests, direct pushes to main, or manual runs.
   workflow_dispatch:
+  push:
+    branches:
+      - main
   pull_request:
     branches:
       - main
