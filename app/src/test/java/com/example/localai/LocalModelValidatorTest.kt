@@ -1,55 +1,39 @@
 package com.example.localai
 
-import android.net.Uri
 import org.junit.Assert.assertThrows
 import org.junit.Test
-import org.junit.runner.RunWith
-import org.robolectric.RobolectricTestRunner
-import org.robolectric.annotation.Config
 
-@RunWith(RobolectricTestRunner::class)
-@Config(sdk = [35])
 class LocalModelValidatorTest {
-    private val uri = Uri.parse("content://test/model.litertlm")
-
     @Test
-    fun acceptsValidPlan() {
-        LocalModelValidator.validate(
-            LocalModelImportPlan(
-                sourceUri = uri,
-                displayName = "gemma-4-E4B-it.litertlm"
-            )
-        )
+    fun acceptsValidFileName() {
+        LocalModelValidator.validateFileName("gemma-4-E4B-it.litertlm")
     }
 
     @Test
     fun rejectsNonLiteRTLMFile() {
         assertThrows(IllegalArgumentException::class.java) {
-            LocalModelValidator.validate(LocalModelImportPlan(uri, "model.bin"))
+            LocalModelValidator.validateFileName("model.bin")
+        }
+    }
+
+    @Test
+    fun rejectsPathTraversalInFileName() {
+        assertThrows(IllegalArgumentException::class.java) {
+            LocalModelValidator.validateFileName("../model.litertlm")
         }
     }
 
     @Test
     fun rejectsOutOfRangeGenerationSettings() {
         assertThrows(IllegalArgumentException::class.java) {
-            LocalModelValidator.validate(
-                LocalModelImportPlan(
-                    sourceUri = uri,
-                    displayName = "model.litertlm",
-                    configuration = LocalModelConfiguration(maxTokens = 99)
-                )
+            LocalModelValidator.validateConfiguration(
+                LocalModelConfiguration(maxTokens = 99)
             )
         }
     }
 
     @Test
-    fun capabilitiesAreMetadataNotImportRestrictions() {
-        LocalModelValidator.validate(
-            LocalModelImportPlan(
-                sourceUri = uri,
-                displayName = "text-only.litertlm",
-                capabilities = ModelCapabilities(image = false)
-            )
-        )
+    fun acceptsCapabilitiesAsMetadataOnly() {
+        LocalModelValidator.validateConfiguration(LocalModelConfiguration())
     }
 }
