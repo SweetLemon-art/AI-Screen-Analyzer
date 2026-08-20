@@ -1,10 +1,9 @@
 name: Android CI
 
 on:
-  push:
-    branches:
-      - main
-      - "fix/**"
+  # CI is intentionally NOT triggered by normal commits/pushes.
+  # Run it manually from GitHub Actions when verification is needed.
+  workflow_dispatch:
   pull_request:
     branches:
       - main
