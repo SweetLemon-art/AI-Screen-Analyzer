@@ -1,7 +1,6 @@
 package com.example.localai
 
 import android.content.Context
-import android.net.Uri
 import org.json.JSONObject
 import java.io.File
 import java.util.UUID
@@ -18,11 +17,11 @@ class LocalModelStore(private val context: Context) {
         ?: emptyList()
 
     fun import(plan: LocalModelImportPlan): LocalModel {
-        require(plan.displayName.isNotBlank()) { "Model name cannot be blank" }
+        LocalModelValidator.validate(plan)
         val source = context.contentResolver.openInputStream(plan.sourceUri)
             ?: error("Unable to open selected model file")
 
-        val safeName = plan.displayName.substringAfterLast('/').ifBlank { "model.litertlm" }
+        val safeName = plan.displayName.trim()
         val id = UUID.randomUUID().toString()
         val modelDir = File(rootDir, id).apply { mkdirs() }
         val modelFile = File(modelDir, safeName)
@@ -56,8 +55,9 @@ class LocalModelStore(private val context: Context) {
     fun modelFile(modelId: String): File {
         require(isSafeId(modelId)) { "Invalid model id" }
         val dir = File(rootDir, modelId)
-        val metadata = File(dir, "model.json")
         val model = readMetadata(dir) ?: error("Model metadata not found")
+        require(model.id == dir.name) { "Model metadata id mismatch" }
+        LocalModelValidator.validateFileName(model.fileName)
         return File(dir, model.fileName).also {
             require(it.isFile) { "Model file not found" }
         }
@@ -65,7 +65,7 @@ class LocalModelStore(private val context: Context) {
 
     private fun readMetadata(dir: File): LocalModel? = runCatching {
         val json = JSONObject(File(dir, "model.json").readText())
-        LocalModel(
+        val model = LocalModel(
             id = json.getString("id"),
             fileName = json.getString("fileName"),
             modelType = ModelType.valueOf(json.optString("modelType", "UNKNOWN")),
@@ -85,6 +85,10 @@ class LocalModelStore(private val context: Context) {
             accelerator = Accelerator.valueOf(json.optString("accelerator", "CPU")),
             importedAtEpochMillis = json.getLong("importedAtEpochMillis")
         )
+        require(isSafeId(model.id)) { "Invalid model metadata id" }
+        LocalModelValidator.validateFileName(model.fileName)
+        require(model.id == dir.name) { "Model metadata id mismatch" }
+        model
     }.getOrNull()
 
     private fun toJson(model: LocalModel): JSONObject = JSONObject().apply {
