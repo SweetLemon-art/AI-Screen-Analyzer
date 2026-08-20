@@ -8,18 +8,7 @@ object LocalModelValidator {
 
     fun validate(plan: LocalModelImportPlan) {
         validateFileName(plan.displayName)
-        require(plan.configuration.maxTokens in 100..4096) {
-            "Max tokens must be 100..4096"
-        }
-        require(plan.configuration.topK in 1..100) {
-            "Top K must be 1..100"
-        }
-        require(plan.configuration.topP in 0.0..1.0) {
-            "Top P must be 0..1"
-        }
-        require(plan.configuration.temperature in 0.0..2.0) {
-            "Temperature must be 0..2"
-        }
+        validateConfiguration(plan.configuration)
     }
 
     fun validateFileName(fileName: String) {
@@ -36,6 +25,21 @@ object LocalModelValidator {
         }
         require(normalized.lowercase(Locale.ROOT).endsWith(".litertlm")) {
             "Only .litertlm model files are supported"
+        }
+    }
+
+    fun validateConfiguration(configuration: LocalModelConfiguration) {
+        require(configuration.maxTokens in 100..4096) {
+            "Max tokens must be 100..4096"
+        }
+        require(configuration.topK in 1..100) {
+            "Top K must be 1..100"
+        }
+        require(configuration.topP in 0.0..1.0) {
+            "Top P must be 0..1"
+        }
+        require(configuration.temperature in 0.0..2.0) {
+            "Temperature must be 0..2"
         }
     }
 }
