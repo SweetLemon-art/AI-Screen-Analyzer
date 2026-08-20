@@ -35,6 +35,8 @@ import kotlin.coroutines.resume
  * - [captureSingleFrame] never creates or recreates a VirtualDisplay.
  * - Android 14+ captured-content resize is handled with VirtualDisplay.resize()/setSurface().
  * - ImageReader replacement is deferred until active captures finish, preventing close/use races.
+ * - Retired readers keep their listener until the owning capture finishes, preventing a resize
+ *   callback from racing with listener registration on the old reader.
  * - Callbacks are explicitly bound to session generations to prevent stale callback pollution.
  * - Callbacks are unregistered before MediaProjection is stopped.
  * - [stop] is strictly idempotent and safe when called repeatedly.
@@ -126,6 +128,7 @@ object ScreenCaptureEngine : ScreenCaptureProvider {
 
         if (screenWidth <= 0) screenWidth = 1080
         if (screenHeight <= 0) screenHeight = 1920
+        if (screenDensity <= 0) screenDensity = DisplayMetrics.DENSITY_DEFAULT
 
         val success = setupSessionResources(projection, currentGen)
         _isReady.value = success
@@ -178,7 +181,6 @@ object ScreenCaptureEngine : ScreenCaptureProvider {
         if (width <= 0 || height <= 0) return
         if (width == screenWidth && height == screenHeight) return
 
-        val projection = mediaProjection ?: return
         val display = virtualDisplay ?: return
         val oldReader = imageReader ?: return
 
@@ -206,8 +208,9 @@ object ScreenCaptureEngine : ScreenCaptureProvider {
             screenHeight = height
             imageReader = newReader
 
-            // A capture may still be using oldReader. Keep it alive until that capture exits.
-            oldReader.setOnImageAvailableListener(null, null)
+            // Do not clear oldReader's listener here. A capture can have obtained the old
+            // reader just before this resize callback. Retaining the listener until that
+            // capture exits prevents a listener-registration/close race.
             if (activeCaptureCount.get() == 0) {
                 closeReaderQuietly(oldReader)
             } else {
