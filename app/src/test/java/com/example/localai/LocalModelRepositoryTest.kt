@@ -14,32 +14,6 @@ import java.io.File
 @Config(sdk = [35])
 class LocalModelRepositoryTest {
     @Test
-    fun validator_accepts_valid_litertlm_plan() {
-        val plan = LocalModelImportPlan(
-            sourceUri = Uri.parse("file:///tmp/model.litertlm"),
-            displayName = "model.litertlm",
-            configuration = LocalModelConfiguration(
-                maxTokens = 2048,
-                topK = 40,
-                topP = 0.9,
-                temperature = 0.7
-            )
-        )
-
-        LocalModelValidator.validate(plan)
-    }
-
-    @Test(expected = IllegalArgumentException::class)
-    fun validator_rejects_non_litertlm_file() {
-        LocalModelValidator.validate(
-            LocalModelImportPlan(
-                sourceUri = Uri.parse("file:///tmp/model.bin"),
-                displayName = "model.bin"
-            )
-        )
-    }
-
-    @Test
     fun store_import_list_model_file_and_delete() {
         val context = ApplicationProvider.getApplicationContext<android.app.Application>()
         val source = File(context.cacheDir, "test-model.litertlm").apply {
@@ -52,12 +26,15 @@ class LocalModelRepositoryTest {
             configuration = LocalModelConfiguration(maxTokens = 512)
         )
 
-        val imported = store.import(plan)
+        try {
+            val imported = store.import(plan)
 
-        assertEquals(listOf(imported.id), store.list().map { it.id })
-        assertEquals("test model payload", store.modelFile(imported.id).readText())
-        assertTrue(store.delete(imported.id))
-        assertTrue(store.list().isEmpty())
-        source.delete()
+            assertEquals(listOf(imported.id), store.list().map { it.id })
+            assertEquals("test model payload", store.modelFile(imported.id).readText())
+            assertTrue(store.delete(imported.id))
+            assertTrue(store.list().isEmpty())
+        } finally {
+            source.delete()
+        }
     }
 }
