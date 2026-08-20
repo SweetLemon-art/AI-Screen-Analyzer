@@ -12,7 +12,7 @@ class LocalModelStore(private val context: Context) {
     }
 
     fun list(): List<LocalModel> = rootDir.listFiles()
-        ?.filter { it.isDirectory }
+        ?.filter { it.isDirectory && !it.name.startsWith(".tmp-") }
         ?.mapNotNull { readMetadata(it) }
         ?.sortedBy { it.fileName.lowercase() }
         ?: emptyList()
@@ -33,13 +33,17 @@ class LocalModelStore(private val context: Context) {
 
         val safeName = plan.displayName.trim()
         val id = UUID.randomUUID().toString()
-        val modelDir = File(rootDir, id).apply { mkdirs() }
-        val modelFile = File(modelDir, safeName)
-        val metadataFile = File(modelDir, "model.json")
+        val tempDir = File(rootDir, ".tmp-$id")
+        val finalDir = File(rootDir, id)
+        val modelFile = File(tempDir, safeName)
+        val metadataFile = File(tempDir, "model.json")
+
+        check(tempDir.mkdirs()) { "Unable to create temporary model directory" }
 
         try {
             source.use { input -> modelFile.outputStream().use { output -> input.copyTo(output) } }
             if (!modelFile.isFile || modelFile.length() == 0L) error("Imported model file is empty")
+
             val model = LocalModel(
                 id = id,
                 fileName = safeName,
@@ -50,9 +54,12 @@ class LocalModelStore(private val context: Context) {
                 importedAtEpochMillis = System.currentTimeMillis()
             )
             metadataFile.writeText(toJson(model).toString())
+
+            check(tempDir.renameTo(finalDir)) { "Unable to finalize imported model" }
             return model
         } catch (error: Throwable) {
-            modelDir.deleteRecursively()
+            tempDir.deleteRecursively()
+            finalDir.deleteRecursively()
             throw error
         }
     }
