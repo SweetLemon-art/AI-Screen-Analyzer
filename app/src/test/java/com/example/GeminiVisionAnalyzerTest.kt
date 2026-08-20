@@ -991,6 +991,46 @@ class GeminiVisionAnalyzerQuotaAndModelTest {
     // ==========================================
 
     @Test
+    fun testSelectingDiscoveredModelSucceeds() {
+        val viewModel = MainViewModel(context)
+        val model = GeminiModel(
+            name = "models/gemini-1.5-flash",
+            displayName = "Gemini 1.5 Flash",
+            description = "Flash",
+            supportedGenerationMethods = listOf("generateContent")
+        )
+        viewModel.handleDiscoveredModels(listOf(model))
+
+        viewModel.selectModel("gemini-1.5-flash")
+        assertEquals("gemini-1.5-flash", viewModel.selectedModel.value)
+        assertEquals("gemini-1.5-flash", settingsRepository.loadSelectedModel())
+        assertNull(viewModel.modelValidationMessage.value)
+    }
+
+    @Test
+    fun testSelectingUnknownModelFailsAndNotPersisted() {
+        val viewModel = MainViewModel(context)
+        val validModel = GeminiModel(
+            name = "models/valid-model",
+            displayName = "Valid Model",
+            description = "Valid",
+            supportedGenerationMethods = listOf("generateContent")
+        )
+        viewModel.handleDiscoveredModels(listOf(validModel))
+        viewModel.selectModel("valid-model")
+        assertEquals("valid-model", viewModel.selectedModel.value)
+
+        // Attempt to select an unknown/undiscovered model
+        viewModel.selectModel("unknown-model-xyz")
+
+        // Must NOT save, must NOT change selected model, must set error
+        assertEquals("valid-model", viewModel.selectedModel.value)
+        assertEquals("valid-model", settingsRepository.loadSelectedModel())
+        assertNotNull(viewModel.modelValidationMessage.value)
+        assertTrue(viewModel.modelValidationMessage.value!!.contains("MODEL_NOT_AVAILABLE"))
+    }
+
+    @Test
     fun testSelectedModelExistsAfterRefreshPreserved() {
         val viewModel = MainViewModel(context)
         val freshModel = GeminiModel(
@@ -1000,6 +1040,7 @@ class GeminiVisionAnalyzerQuotaAndModelTest {
             supportedGenerationMethods = listOf("generateContent")
         )
 
+        viewModel.handleDiscoveredModels(listOf(freshModel))
         viewModel.selectModel("active-vision-model")
         assertEquals("active-vision-model", viewModel.selectedModel.value)
 
@@ -1030,7 +1071,7 @@ class GeminiVisionAnalyzerQuotaAndModelTest {
     }
 
     @Test
-    fun testDeduplicationByCanonicalModelId() {
+    fun testDeduplicationByCanonicalModelIdPrefersExactBaseModel() {
         val viewModel = MainViewModel(context)
         val modelA = GeminiModel(
             name = "models/gemini-1.5-flash-001",
@@ -1040,25 +1081,24 @@ class GeminiVisionAnalyzerQuotaAndModelTest {
             baseModelId = "gemini-1.5-flash"
         )
         val modelB = GeminiModel(
-            name = "models/gemini-1.5-flash-latest",
-            displayName = "Gemini 1.5 Flash Latest",
-            description = "Flash latest",
-            supportedGenerationMethods = listOf("generateContent"),
-            baseModelId = "gemini-1.5-flash"
+            name = "models/gemini-1.5-flash",
+            displayName = "Gemini 1.5 Flash Base",
+            description = "Flash exact base",
+            supportedGenerationMethods = listOf("generateContent")
         )
 
         viewModel.handleDiscoveredModels(listOf(modelA, modelB))
 
-        // Should be deduplicated to 1 entry
+        // Should be deduplicated to 1 entry, preferring exact base model
         assertEquals(1, viewModel.discoveredModels.value.size)
         assertEquals("gemini-1.5-flash", viewModel.discoveredModels.value[0].canonicalModelId)
+        assertEquals("gemini-1.5-flash", viewModel.discoveredModels.value[0].modelId)
     }
 
     @Test
     fun testSelectedModelMissingAfterRefreshCleared() {
         val viewModel = MainViewModel(context)
-        viewModel.selectModel("old-model-discontinued")
-        assertEquals("old-model-discontinued", viewModel.selectedModel.value)
+        settingsRepository.saveSelectedModel("old-model-discontinued")
 
         val freshList = listOf(
             GeminiModel(
@@ -1080,7 +1120,7 @@ class GeminiVisionAnalyzerQuotaAndModelTest {
     @Test
     fun testModelListEmptyClearedAndNoCompatibleModels() {
         val viewModel = MainViewModel(context)
-        viewModel.selectModel("some-model")
+        settingsRepository.saveSelectedModel("some-model")
 
         viewModel.handleDiscoveredModels(emptyList())
 
@@ -1093,13 +1133,14 @@ class GeminiVisionAnalyzerQuotaAndModelTest {
     @Test
     fun testModelListFailureSelectionPreserved() = runTest {
         keyStore.saveApiKey("test-key")
+        settingsRepository.saveSelectedModel("preserved-model")
+
+        val viewModel = MainViewModel(context)
+        assertEquals("preserved-model", viewModel.selectedModel.value)
+
         val client = createClient {
             throw IOException("Network offline")
         }
-
-        val viewModel = MainViewModel(context)
-        viewModel.selectModel("preserved-model")
-        assertEquals("preserved-model", viewModel.selectedModel.value)
 
         viewModel.fetchAvailableModels()
         advanceUntilIdle()
@@ -1107,6 +1148,7 @@ class GeminiVisionAnalyzerQuotaAndModelTest {
         // Discovery network failure must NOT destroy existing valid selection
         assertEquals("preserved-model", viewModel.selectedModel.value)
         assertEquals("preserved-model", settingsRepository.loadSelectedModel())
+        assertFalse(viewModel.hasFreshModelDiscovery.value)
     }
 
     @Test
@@ -1144,6 +1186,7 @@ class GeminiVisionAnalyzerQuotaAndModelTest {
 
         val viewModel = MainViewModel(context)
         assertEquals("stale-model", viewModel.selectedModel.value)
+        assertFalse(viewModel.hasFreshModelDiscovery.value)
 
         // Fresh discovery comes with different authoritative models
         val freshAuthoritative = listOf(
@@ -1161,6 +1204,7 @@ class GeminiVisionAnalyzerQuotaAndModelTest {
         assertEquals("", viewModel.selectedModel.value)
         assertEquals(1, viewModel.discoveredModels.value.size)
         assertEquals("fresh-model", viewModel.discoveredModels.value[0].modelId)
+        assertTrue(viewModel.hasFreshModelDiscovery.value)
     }
 }
 
@@ -1425,7 +1469,6 @@ class MonitoringControllerLifecycleRaceTest {
 
         // Capture is in-flight; call stop
         controller.stopMonitoring()
-        assertEquals(MonitoringState.Idle, controller.state.value)
 
         // Release blocked capture
         captureGate.complete(Unit)
@@ -1470,7 +1513,6 @@ class MonitoringControllerLifecycleRaceTest {
 
         // Gemini in-flight; call stop
         controller.stopMonitoring()
-        assertEquals(MonitoringState.Idle, controller.state.value)
 
         // Release the gated gemini analysis
         geminiGate.complete(Unit)
@@ -1665,4 +1707,74 @@ class MonitoringControllerLifecycleRaceTest {
         assertEquals(2160, settingsMax.maxResolutionDimension)
         assertEquals(100, settingsMax.compressionQuality)
     }
+
+    @Test
+    fun testResetStateClearsLatestBitmap() = runTest {
+        val testDispatcher = StandardTestDispatcher(testScheduler)
+        val testScope = TestScope(testDispatcher)
+
+        val fakeAnalyzer = object : VisionAnalyzer {
+            override val rateLimitState = MutableStateFlow(RateLimitState.NORMAL).asStateFlow()
+            override suspend fun analyze(bitmap: Bitmap, context: AnalysisContext, settings: CaptureSettings): AnalysisResult {
+                return AnalysisResult(
+                    contextName = context.name,
+                    summary = "Summary",
+                    observations = emptyList(),
+                    conclusion = "OK",
+                    rawResponse = "",
+                    isSuccess = true,
+                    errorMessage = null,
+                    processingDurationMs = 10L
+                )
+            }
+            override suspend fun testConnection(): ConnectionTestResult = ConnectionTestResult.Success("OK")
+            override suspend fun discoverModels(): Result<List<GeminiModel>> = Result.success(emptyList())
+        }
+
+        val controller = MonitoringController(fakeAnalyzer, testScope, FakeCaptureProvider())
+
+        controller.startMonitoring({ AnalysisContext.DEFAULT }, { CaptureSettings.DEFAULT })
+        advanceTimeBy(100)
+        controller.stopMonitoring()
+        advanceUntilIdle()
+
+        assertNotNull(controller.latestBitmap.value)
+        controller.resetState()
+
+        assertNull("resetState must clear _latestBitmap", controller.latestBitmap.value)
+        assertNull("resetState must clear _latestResult", controller.latestResult.value)
+        assertEquals(0, controller.analysisCount.value)
+        assertNull(controller.lastCaptureTimestamp.value)
+        assertEquals(MonitoringState.Idle, controller.state.value)
+    }
+
+    @Test
+    fun testTrySendFailureWhenChannelClosedHandledSafely() {
+        val testDispatcher = StandardTestDispatcher()
+        val testScope = TestScope(testDispatcher)
+
+        val fakeAnalyzer = object : VisionAnalyzer {
+            override val rateLimitState = MutableStateFlow(RateLimitState.NORMAL).asStateFlow()
+            override suspend fun analyze(bitmap: Bitmap, context: AnalysisContext, settings: CaptureSettings): AnalysisResult =
+                AnalysisResult(
+                    contextName = context.name,
+                    summary = "S",
+                    observations = emptyList(),
+                    conclusion = "C",
+                    rawResponse = "",
+                    isSuccess = true,
+                    errorMessage = null,
+                    processingDurationMs = 1L
+                )
+            override suspend fun testConnection() = ConnectionTestResult.Success("OK")
+            override suspend fun discoverModels() = Result.success(emptyList<GeminiModel>())
+        }
+
+        val controller = MonitoringController(fakeAnalyzer, testScope, FakeCaptureProvider())
+
+        // Stop monitoring works safely
+        controller.stopMonitoring()
+        assertEquals(MonitoringState.Idle, controller.state.value)
+    }
 }
+

@@ -122,8 +122,8 @@ class SettingsRepository(context: Context) {
                 }
                 val inputLimit = if (obj.has("inputTokenLimit")) obj.optInt("inputTokenLimit") else null
                 val outputLimit = if (obj.has("outputTokenLimit")) obj.optInt("outputTokenLimit") else null
-                val version = if (obj.has("version")) obj.optString("version", null) else null
-                val baseModelId = if (obj.has("baseModelId")) obj.optString("baseModelId", null) else null
+                val version = if (obj.has("version") && !obj.isNull("version")) obj.optString("version") else null
+                val baseModelId = if (obj.has("baseModelId") && !obj.isNull("baseModelId")) obj.optString("baseModelId") else null
 
                 list.add(
                     GeminiModel(

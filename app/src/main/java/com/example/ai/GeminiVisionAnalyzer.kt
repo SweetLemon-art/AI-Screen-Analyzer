@@ -507,8 +507,8 @@ class GeminiVisionAnalyzer(
 
             val inputTokenLimit = if (modelObj.has("inputTokenLimit")) modelObj.optInt("inputTokenLimit") else null
             val outputTokenLimit = if (modelObj.has("outputTokenLimit")) modelObj.optInt("outputTokenLimit") else null
-            val version = if (modelObj.has("version")) modelObj.optString("version", null) else null
-            val baseModelId = if (modelObj.has("baseModelId")) modelObj.optString("baseModelId", null) else null
+            val version = if (modelObj.has("version") && !modelObj.isNull("version")) modelObj.optString("version") else null
+            val baseModelId = if (modelObj.has("baseModelId") && !modelObj.isNull("baseModelId")) modelObj.optString("baseModelId") else null
 
             modelsList.add(
                 GeminiModel(

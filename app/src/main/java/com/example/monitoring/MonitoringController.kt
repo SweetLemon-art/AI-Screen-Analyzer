@@ -142,7 +142,6 @@ class MonitoringController(
         contextProvider: () -> AnalysisContext,
         settingsProvider: () -> CaptureSettings
     ) {
-        _state.value = MonitoringState.Starting
         commandChannel.trySend(LifecycleCommand.Start(contextProvider, settingsProvider))
     }
 
@@ -150,8 +149,13 @@ class MonitoringController(
      * Enqueues STOP to the single lifecycle coordinator.
      */
     fun stopMonitoring() {
-        _state.value = MonitoringState.Idle
-        commandChannel.trySend(LifecycleCommand.Stop)
+        val result = commandChannel.trySend(LifecycleCommand.Stop)
+        if (result.isFailure) {
+            // Channel is closed/unavailable: enforce cancellation and cleanup directly
+            sessionCounter.incrementAndGet()
+            activeJob?.cancel()
+            _state.value = MonitoringState.Idle
+        }
     }
 
     /**
@@ -190,8 +194,10 @@ class MonitoringController(
 
                 val capturedBitmap = when (captureResult) {
                     is CaptureResult.Success -> {
-                        _latestBitmap.value = captureResult.bitmap
-                        _lastCaptureTimestamp.value = System.currentTimeMillis()
+                        if (sessionId == sessionCounter.get()) {
+                            _latestBitmap.value = captureResult.bitmap
+                            _lastCaptureTimestamp.value = System.currentTimeMillis()
+                        }
                         captureResult.bitmap
                     }
                     is CaptureResult.Error -> {
@@ -231,9 +237,8 @@ class MonitoringController(
                 }
             }
         } catch (e: CancellationException) {
-            if (sessionId == sessionCounter.get()) {
-                _state.value = MonitoringState.Idle
-            }
+            // CancellationException must propagate and never be swallowed
+            throw e
         } catch (e: Exception) {
             if (sessionId == sessionCounter.get()) {
                 _state.value = MonitoringState.Error(e.localizedMessage ?: "Unexpected error during monitoring")
@@ -250,6 +255,7 @@ class MonitoringController(
 
     fun resetState() {
         stopMonitoring()
+        _latestBitmap.value = null
         _latestResult.value = null
         _analysisCount.value = 0
         _lastCaptureTimestamp.value = null

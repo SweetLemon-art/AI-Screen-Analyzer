@@ -36,6 +36,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _discoveredModels = MutableStateFlow(settingsRepository.loadDiscoveredModels())
     val discoveredModels: StateFlow<List<GeminiModel>> = _discoveredModels.asStateFlow()
 
+    // Explicit state indicating whether fresh model discovery has succeeded in current session
+    private val _hasFreshModelDiscovery = MutableStateFlow(false)
+    val hasFreshModelDiscovery: StateFlow<Boolean> = _hasFreshModelDiscovery.asStateFlow()
+
     // Model validation message (e.g. when selected model is no longer available)
     private val _modelValidationMessage = MutableStateFlow<String?>(null)
     val modelValidationMessage: StateFlow<String?> = _modelValidationMessage.asStateFlow()
@@ -122,10 +126,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             it.modelId == cleanModel ||
             com.example.ai.normalizeModelId(it.name) == cleanModel
         }
-        val canonicalToSave = matched?.canonicalModelId ?: cleanModel
-        _selectedModel.value = canonicalToSave
-        settingsRepository.saveSelectedModel(canonicalToSave)
-        _modelValidationMessage.value = null
+        if (matched != null) {
+            val canonicalToSave = matched.canonicalModelId
+            _selectedModel.value = canonicalToSave
+            settingsRepository.saveSelectedModel(canonicalToSave)
+            _modelValidationMessage.value = null
+        } else {
+            // P0-A: Model not in current compatible models: do NOT save, do NOT change selected model
+            _modelValidationMessage.value = "MODEL_NOT_AVAILABLE: Selected model '$cleanModel' is not available in discovered compatible models."
+        }
     }
 
     fun clearSelectedModel() {
@@ -146,6 +155,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         _discoveredModels.value = compatibleModels
         settingsRepository.saveDiscoveredModels(compatibleModels)
+        _hasFreshModelDiscovery.value = true
 
         if (compatibleModels.isEmpty()) {
             clearSelectedModel()
@@ -268,6 +278,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun onMediaProjectionApproved(resultCode: Int, data: Intent, appContext: Context) {
         viewModelScope.launch {
+            if (!_hasFreshModelDiscovery.value) {
+                _modelValidationMessage.value = "Refreshing model discovery before starting monitoring..."
+                val discoveryResult = visionAnalyzer.discoverModels()
+                discoveryResult.onSuccess { freshModels ->
+                    handleDiscoveredModels(freshModels)
+                }.onFailure { error ->
+                    _modelValidationMessage.value = "DISCOVERY_FAILED: Cannot start monitoring. Model discovery failed: ${error.localizedMessage ?: "Network error"}"
+                    return@launch
+                }
+            }
+
+            if (!_hasFreshModelDiscovery.value) {
+                _modelValidationMessage.value = "DISCOVERY_REQUIRED: Model discovery must complete before monitoring can start."
+                return@launch
+            }
+
+            val currentSelected = _selectedModel.value
+            val isValid = _discoveredModels.value.any { it.canonicalModelId == currentSelected }
+            if (currentSelected.isBlank() || !isValid) {
+                _modelValidationMessage.value = "MODEL_NOT_AVAILABLE: Please select a valid compatible model before starting monitoring."
+                return@launch
+            }
+
             ScreenCaptureService.startService(appContext, resultCode, data)
             controller.startMonitoring(
                 contextProvider = { _currentContext.value },
