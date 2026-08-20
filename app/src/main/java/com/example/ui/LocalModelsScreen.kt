@@ -26,7 +26,6 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -43,21 +42,27 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.example.localai.Accelerator
+import com.example.localai.LocalModel
 import com.example.localai.LocalModelConfiguration
 import com.example.localai.LocalModelImportPlan
 import com.example.localai.LocalModelRepository
 import com.example.localai.ModelCapabilities
 import com.example.localai.ModelType
+import kotlinx.coroutines.launch
 
 @Composable
 fun LocalModelsScreen() {
     val context = LocalContext.current
     val repository = remember { LocalModelRepository(context) }
-    var models by remember { mutableStateOf(emptyList<com.example.localai.LocalModel>()) }
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+    var models by remember { mutableStateOf(emptyList<LocalModel>()) }
     var selectedUri by remember { mutableStateOf<android.net.Uri?>(null) }
     var selectedName by remember { mutableStateOf("") }
     var importing by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
+
+    fun reload() { scope.launch { models = repository.listModels() } }
+    LaunchedEffect(Unit) { reload() }
 
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
@@ -68,8 +73,6 @@ fun LocalModelsScreen() {
                 ?: "model.litertlm"
         }
     }
-
-    LaunchedEffect(Unit) { models = repository.listModels() }
 
     Column(Modifier.fillMaxSize().padding(16.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
@@ -85,9 +88,7 @@ fun LocalModelsScreen() {
                 Text("Import")
             }
         }
-
         Spacer(Modifier.height(16.dp))
-
         if (models.isEmpty()) {
             Text("No local models imported yet.")
         } else {
@@ -101,11 +102,11 @@ fun LocalModelsScreen() {
                                 Text("${model.configuration.maxTokens} tokens • Top K ${model.configuration.topK}")
                             }
                             IconButton(onClick = {
-                                importing = true
-                                error = null
-                            }) {
-                                Icon(Icons.Default.Delete, contentDescription = "Delete")
-                            }
+                                scope.launch {
+                                    repository.deleteModel(model.id).onFailure { error = it.message }
+                                    reload()
+                                }
+                            }) { Icon(Icons.Default.Delete, contentDescription = "Delete") }
                         }
                     }
                 }
@@ -121,27 +122,34 @@ fun LocalModelsScreen() {
             onImport = { plan ->
                 importing = true
                 error = null
-                androidx.compose.runtime.LaunchedEffect(Unit) { }
+                scope.launch {
+                    repository.importModel(plan)
+                        .onSuccess { selectedUri = null; reload() }
+                        .onFailure { error = it.message ?: "Unable to import model" }
+                    importing = false
+                }
             },
-            onImportPlan = { plan ->
-                importing = true
-                kotlinx.coroutines.GlobalScope // replaced below by the scoped launcher in the dialog callback
-            }
+            uri = uri
         )
     }
 
     error?.let { message ->
-        AlertDialog(onDismissRequest = { error = null }, title = { Text("Import failed") }, text = { Text(message) }, confirmButton = { Button(onClick = { error = null }) { Text("OK") } })
+        AlertDialog(
+            onDismissRequest = { error = null },
+            title = { Text("Local model error") },
+            text = { Text(message) },
+            confirmButton = { Button(onClick = { error = null }) { Text("OK") } }
+        )
     }
 }
 
 @Composable
 private fun ModelImportDialog(
     fileName: String,
+    uri: android.net.Uri,
     importing: Boolean,
     onCancel: () -> Unit,
-    onImport: (LocalModelImportPlan) -> Unit,
-    onImportPlan: (LocalModelImportPlan) -> Unit
+    onImport: (LocalModelImportPlan) -> Unit
 ) {
     var maxTokens by remember { mutableIntStateOf(1024) }
     var topK by remember { mutableIntStateOf(64) }
@@ -154,7 +162,7 @@ private fun ModelImportDialog(
     var speculative by remember { mutableStateOf(false) }
     var accelerator by remember { mutableStateOf(Accelerator.CPU) }
 
-    fun plan(uri: android.net.Uri) = LocalModelImportPlan(
+    val plan = LocalModelImportPlan(
         sourceUri = uri,
         displayName = fileName,
         modelType = ModelType.LLM,
@@ -176,12 +184,15 @@ private fun ModelImportDialog(
                 item { CapabilityRow("Support image", image) { image = it } }
                 item { CapabilityRow("Support audio", audio) { audio = it } }
                 item { CapabilityRow("Support thinking", thinking) { thinking = it } }
+                item { CapabilityRow("Support mobile actions", mobileActions) { mobileActions = it } }
                 item { CapabilityRow("Support speculative decoding", speculative) { speculative = it } }
                 item { Text("Compatible accelerators") ; Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) { Accelerator.values().forEach { value -> FilterChip(selected = accelerator == value, onClick = { accelerator = value }, label = { Text(value.name) }) } } }
             }
         },
         confirmButton = {
-            Button(enabled = !importing, onClick = { /* URI is supplied by the outer screen through the callback */ }) { if (importing) CircularProgressIndicator() else Text("Import") }
+            Button(enabled = !importing, onClick = { onImport(plan) }) {
+                if (importing) CircularProgressIndicator() else Text("Import")
+            }
         },
         dismissButton = { OutlinedButton(enabled = !importing, onClick = onCancel) { Text("Cancel") } }
     )
