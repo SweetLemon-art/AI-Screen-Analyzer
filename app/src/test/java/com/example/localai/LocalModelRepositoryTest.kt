@@ -2,7 +2,8 @@ package com.example.localai
 
 import android.net.Uri
 import androidx.test.core.app.ApplicationProvider
-import com.google.common.truth.Truth.assertThat
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
 
@@ -48,10 +49,10 @@ class LocalModelRepositoryTest {
 
         val imported = store.import(plan)
 
-        assertThat(store.list().map { it.id }).containsExactly(imported.id)
-        assertThat(store.modelFile(imported.id).readText()).isEqualTo("test model payload")
-        assertThat(store.delete(imported.id)).isTrue()
-        assertThat(store.list()).isEmpty()
+        assertEquals(listOf(imported.id), store.list().map { it.id })
+        assertEquals("test model payload", store.modelFile(imported.id).readText())
+        assertTrue(store.delete(imported.id))
+        assertTrue(store.list().isEmpty())
         source.delete()
     }
 }
