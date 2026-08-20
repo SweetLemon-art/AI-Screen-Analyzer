@@ -3,7 +3,10 @@ package com.example.localai
 import android.net.Uri
 import org.junit.Assert.assertThrows
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
 
+@RunWith(RobolectricTestRunner::class)
 class LocalModelValidatorTest {
     private val uri = Uri.parse("content://test/model.litertlm")
 
