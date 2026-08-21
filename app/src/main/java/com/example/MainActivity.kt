@@ -15,11 +15,13 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Monitor
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Storage
+import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.Home
 import androidx.compose.material.icons.outlined.Monitor
@@ -44,6 +46,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.ui.AskAiScreen
 import com.example.ui.ContextScreen
 import com.example.ui.HomeScreen
 import com.example.ui.LocalModelsScreen
@@ -83,6 +86,7 @@ fun MainAppScaffold(viewModel: MainViewModel) {
     val navDestinations = listOf(
         NavDestination(ScreenRoute.HOME, "Home", Icons.Filled.Home, Icons.Outlined.Home, "nav_home"),
         NavDestination(ScreenRoute.MONITOR, "Monitor", Icons.Filled.Monitor, Icons.Outlined.Monitor, "nav_monitor"),
+        NavDestination(ScreenRoute.ASK_AI, "Ask AI", Icons.Filled.AutoAwesome, Icons.Outlined.AutoAwesome, "nav_ask_ai"),
         NavDestination(ScreenRoute.CONTEXT, "Context", Icons.Filled.Description, Icons.Outlined.Description, "nav_context"),
         NavDestination(ScreenRoute.LOCAL_AI, "Local AI", Icons.Filled.Storage, Icons.Outlined.Storage, "nav_local_ai"),
         NavDestination(ScreenRoute.SETTINGS, "Settings", Icons.Filled.Settings, Icons.Outlined.Settings, "nav_settings")
@@ -129,6 +133,7 @@ fun MainAppScaffold(viewModel: MainViewModel) {
                 when (route) {
                     ScreenRoute.HOME -> HomeScreen(viewModel)
                     ScreenRoute.MONITOR -> MonitorScreen(viewModel)
+                    ScreenRoute.ASK_AI -> AskAiScreen(viewModel)
                     ScreenRoute.CONTEXT -> ContextScreen(viewModel)
                     ScreenRoute.LOCAL_AI -> LocalModelsScreen()
                     ScreenRoute.SETTINGS -> SettingsScreen(viewModel)
