@@ -5,6 +5,7 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -19,18 +20,13 @@ class LocalAiProviderTest {
         importedAtEpochMillis = 1L
     )
 
-    private val visionModel = model.copy(
-        id = "vision-model",
-        capabilities = ModelCapabilities(image = true)
-    )
+    private val visionModel = model.copy(id = "vision-model", capabilities = ModelCapabilities(image = true))
 
     @Test
     fun selectModelLoadsInstalledModel() = runBlocking {
         val runtime = FakeRuntime()
         val provider = LocalAiProvider(FakeCatalog(listOf(model)), runtime)
-
         val result = provider.selectModel("model-1")
-
         assertTrue(result.isSuccess)
         assertEquals("model-1", provider.selectedModelId())
         assertEquals("model-1", runtime.loadedModel?.id)
@@ -40,9 +36,7 @@ class LocalAiProviderTest {
     fun selectModelRejectsUnknownModelWithoutCallingRuntime() = runBlocking {
         val runtime = FakeRuntime()
         val provider = LocalAiProvider(FakeCatalog(emptyList()), runtime)
-
         val result = provider.selectModel("missing")
-
         assertTrue(result.isFailure)
         assertEquals(null, provider.selectedModelId())
         assertEquals(null, runtime.loadedModel)
@@ -51,9 +45,7 @@ class LocalAiProviderTest {
     @Test
     fun generateFailsWhenNoModelIsSelected() = runBlocking {
         val provider = LocalAiProvider(FakeCatalog(listOf(model)), FakeRuntime())
-
         val events = provider.generate("hello").toList()
-
         assertEquals(1, events.size)
         assertTrue(events.single() is LocalAiEvent.Failed)
     }
@@ -63,13 +55,8 @@ class LocalAiProviderTest {
         val runtime = FakeRuntime()
         val provider = LocalAiProvider(FakeCatalog(listOf(model)), runtime)
         provider.selectModel("model-1")
-
         val events = provider.generate("hello").toList()
-
-        assertEquals(
-            listOf(LocalAiEvent.Started, LocalAiEvent.Token("hello"), LocalAiEvent.Completed),
-            events
-        )
+        assertEquals(listOf(LocalAiEvent.Started, LocalAiEvent.Token("hello"), LocalAiEvent.Completed), events)
         assertEquals("hello", runtime.lastPrompt)
     }
 
@@ -79,13 +66,8 @@ class LocalAiProviderTest {
         val provider = LocalAiProvider(FakeCatalog(listOf(visionModel)), runtime)
         provider.selectModel("vision-model")
         val image = byteArrayOf(1, 2, 3, 4)
-
         val events = provider.generate("describe this", image).toList()
-
-        assertEquals(
-            listOf(LocalAiEvent.Started, LocalAiEvent.Token("describe this"), LocalAiEvent.Completed),
-            events
-        )
+        assertEquals(listOf(LocalAiEvent.Started, LocalAiEvent.Token("describe this"), LocalAiEvent.Completed), events)
         assertEquals("describe this", runtime.lastPrompt)
         assertTrue(runtime.lastImageBytes!!.contentEquals(image))
     }
@@ -95,9 +77,7 @@ class LocalAiProviderTest {
         val runtime = FakeRuntime()
         val provider = LocalAiProvider(FakeCatalog(listOf(visionModel)), runtime)
         provider.selectModel("vision-model")
-
         val events = provider.generate("describe this", byteArrayOf()).toList()
-
         assertEquals(1, events.size)
         assertTrue(events.single() is LocalAiEvent.Failed)
     }
@@ -107,20 +87,56 @@ class LocalAiProviderTest {
         val runtime = FakeRuntime()
         val provider = LocalAiProvider(FakeCatalog(listOf(model)), runtime)
         provider.selectModel("model-1")
-
         provider.unload()
-
         assertEquals(null, provider.selectedModelId())
         assertTrue(runtime.unloaded)
     }
 
-    private class FakeCatalog(
-        private val models: List<LocalModel>
-    ) : LocalModelCatalog {
+    @Test
+    fun deleteModelUnloadsSelectedModelBeforeDeletingStorage() = runBlocking {
+        val events = mutableListOf<String>()
+        val runtime = FakeRuntime(events)
+        val repository = FakeDeletableCatalog(listOf(model), events)
+        val provider = LocalAiProvider(repository, runtime)
+        provider.selectModel("model-1")
+        val result = provider.deleteModel("model-1")
+        assertTrue(result.isSuccess)
+        assertEquals(listOf("unload", "delete:model-1"), events)
+        assertTrue(runtime.unloaded)
+        assertEquals(null, provider.selectedModelId())
+    }
+
+    @Test
+    fun deleteOtherModelDoesNotUnloadSelectedModel() = runBlocking {
+        val otherModel = model.copy(id = "model-2")
+        val events = mutableListOf<String>()
+        val runtime = FakeRuntime(events)
+        val repository = FakeDeletableCatalog(listOf(model, otherModel), events)
+        val provider = LocalAiProvider(repository, runtime)
+        provider.selectModel("model-1")
+        val result = provider.deleteModel("model-2")
+        assertTrue(result.isSuccess)
+        assertEquals(listOf("delete:model-2"), events)
+        assertFalse(runtime.unloaded)
+        assertEquals("model-1", provider.selectedModelId())
+    }
+
+    private class FakeCatalog(private val models: List<LocalModel>) : LocalModelCatalog {
         override suspend fun listModels(): List<LocalModel> = models
     }
 
-    private class FakeRuntime : LocalModelRuntime {
+    private class FakeDeletableCatalog(
+        private val models: List<LocalModel>,
+        private val events: MutableList<String>
+    ) : LocalModelCatalog, LocalModelDeletionCatalog {
+        override suspend fun listModels(): List<LocalModel> = models
+        override suspend fun deleteModel(modelId: String): Result<Unit> {
+            events += "delete:$modelId"
+            return Result.success(Unit)
+        }
+    }
+
+    private class FakeRuntime(private val events: MutableList<String> = mutableListOf()) : LocalModelRuntime {
         var loadedModel: LocalModel? = null
         var lastPrompt: String? = null
         var lastImageBytes: ByteArray? = null
@@ -128,6 +144,7 @@ class LocalAiProviderTest {
 
         override suspend fun load(model: LocalModel): Result<Unit> {
             loadedModel = model
+            unloaded = false
             return Result.success(Unit)
         }
 
@@ -150,6 +167,7 @@ class LocalAiProviderTest {
         )
 
         override suspend fun unload() {
+            events += "unload"
             unloaded = true
             loadedModel = null
         }

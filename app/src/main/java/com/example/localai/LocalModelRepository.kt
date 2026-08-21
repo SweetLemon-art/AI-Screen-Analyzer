@@ -4,7 +4,7 @@ import android.content.Context
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
-class LocalModelRepository(context: Context) : LocalModelCatalog {
+class LocalModelRepository(context: Context) : LocalModelCatalog, LocalModelDeletionCatalog {
     private val store = LocalModelStore(context.applicationContext)
 
     override suspend fun listModels(): List<LocalModel> = withContext(Dispatchers.IO) { store.list() }
@@ -16,7 +16,7 @@ class LocalModelRepository(context: Context) : LocalModelCatalog {
         }
     }
 
-    suspend fun deleteModel(modelId: String): Result<Unit> = withContext(Dispatchers.IO) {
+    override suspend fun deleteModel(modelId: String): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching {
             check(store.delete(modelId)) { "Model not found" }
         }

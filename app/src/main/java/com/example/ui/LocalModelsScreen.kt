@@ -45,20 +45,20 @@ import com.example.localai.Accelerator
 import com.example.localai.LocalModel
 import com.example.localai.LocalModelConfiguration
 import com.example.localai.LocalModelImportPlan
-import com.example.localai.LocalModelRepository
 import com.example.localai.ModelCapabilities
 import com.example.localai.ModelType
 import kotlinx.coroutines.launch
 
 @Composable
-fun LocalModelsScreen() {
+fun LocalModelsScreen(viewModel: MainViewModel) {
     val context = LocalContext.current
-    val repository = remember { LocalModelRepository(context) }
+    val repository = viewModel.localModelRepositoryForUi()
     val scope = androidx.compose.runtime.rememberCoroutineScope()
     var models by remember { mutableStateOf(emptyList<LocalModel>()) }
     var selectedUri by remember { mutableStateOf<android.net.Uri?>(null) }
     var selectedName by remember { mutableStateOf("") }
     var importing by remember { mutableStateOf(false) }
+    var deletingModelId by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
 
     fun reload() { scope.launch { models = repository.listModels() } }
@@ -101,12 +101,17 @@ fun LocalModelsScreen() {
                                 Text("${model.modelType.name} • ${model.accelerator.name}")
                                 Text("${model.configuration.maxTokens} tokens • Top K ${model.configuration.topK}")
                             }
-                            IconButton(onClick = {
+                            IconButton(enabled = deletingModelId == null, onClick = {
+                                deletingModelId = model.id
                                 scope.launch {
-                                    repository.deleteModel(model.id).onFailure { error = it.message }
+                                    viewModel.deleteLocalModel(model.id)
+                                        .onFailure { error = it.message ?: "Unable to delete model" }
                                     reload()
+                                    deletingModelId = null
                                 }
-                            }) { Icon(Icons.Default.Delete, contentDescription = "Delete") }
+                            }) {
+                                if (deletingModelId == model.id) CircularProgressIndicator() else Icon(Icons.Default.Delete, contentDescription = "Delete")
+                            }
                         }
                     }
                 }
@@ -115,42 +120,25 @@ fun LocalModelsScreen() {
     }
 
     selectedUri?.let { uri ->
-        ModelImportDialog(
-            fileName = selectedName,
-            importing = importing,
-            onCancel = { if (!importing) selectedUri = null },
-            onImport = { plan ->
-                importing = true
-                error = null
-                scope.launch {
-                    repository.importModel(plan)
-                        .onSuccess { selectedUri = null; reload() }
-                        .onFailure { error = it.message ?: "Unable to import model" }
-                    importing = false
-                }
-            },
-            uri = uri
-        )
+        ModelImportDialog(fileName = selectedName, importing = importing, onCancel = { if (!importing) selectedUri = null }, onImport = { plan ->
+            importing = true
+            error = null
+            scope.launch {
+                repository.importModel(plan)
+                    .onSuccess { selectedUri = null; reload() }
+                    .onFailure { error = it.message ?: "Unable to import model" }
+                importing = false
+            }
+        }, uri = uri)
     }
 
     error?.let { message ->
-        AlertDialog(
-            onDismissRequest = { error = null },
-            title = { Text("Local model error") },
-            text = { Text(message) },
-            confirmButton = { Button(onClick = { error = null }) { Text("OK") } }
-        )
+        AlertDialog(onDismissRequest = { error = null }, title = { Text("Local model error") }, text = { Text(message) }, confirmButton = { Button(onClick = { error = null }) { Text("OK") } })
     }
 }
 
 @Composable
-private fun ModelImportDialog(
-    fileName: String,
-    uri: android.net.Uri,
-    importing: Boolean,
-    onCancel: () -> Unit,
-    onImport: (LocalModelImportPlan) -> Unit
-) {
+private fun ModelImportDialog(fileName: String, uri: android.net.Uri, importing: Boolean, onCancel: () -> Unit, onImport: (LocalModelImportPlan) -> Unit) {
     var maxTokens by remember { mutableIntStateOf(1024) }
     var topK by remember { mutableIntStateOf(64) }
     var topP by remember { mutableDoubleStateOf(0.95) }
@@ -162,40 +150,23 @@ private fun ModelImportDialog(
     var speculative by remember { mutableStateOf(false) }
     var accelerator by remember { mutableStateOf(Accelerator.CPU) }
 
-    val plan = LocalModelImportPlan(
-        sourceUri = uri,
-        displayName = fileName,
-        modelType = ModelType.LLM,
-        configuration = LocalModelConfiguration(maxTokens, topK, topP, temperature),
-        capabilities = ModelCapabilities(image, audio, false, mobileActions, thinking, speculative),
-        accelerator = accelerator
-    )
+    val plan = LocalModelImportPlan(uri, fileName, ModelType.LLM, LocalModelConfiguration(maxTokens, topK, topP, temperature), ModelCapabilities(image, audio, false, mobileActions, thinking, speculative), accelerator)
 
-    AlertDialog(
-        onDismissRequest = onCancel,
-        title = { Text("Import Model") },
-        text = {
-            LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                item { Text("Name") ; Text(fileName) ; Text("Model type: LLM") }
-                item { Text("Max tokens: $maxTokens") ; Slider(value = maxTokens.toFloat(), onValueChange = { maxTokens = it.toInt() }, valueRange = 100f..4096f) }
-                item { Text("Top K: $topK") ; Slider(value = topK.toFloat(), onValueChange = { topK = it.toInt() }, valueRange = 1f..100f) }
-                item { Text("Top P: %.2f".format(topP)) ; Slider(value = topP.toFloat(), onValueChange = { topP = it.toDouble() }, valueRange = 0f..1f) }
-                item { Text("Temperature: %.2f".format(temperature)) ; Slider(value = temperature.toFloat(), onValueChange = { temperature = it.toDouble() }, valueRange = 0f..2f) }
-                item { CapabilityRow("Support image", image) { image = it } }
-                item { CapabilityRow("Support audio", audio) { audio = it } }
-                item { CapabilityRow("Support thinking", thinking) { thinking = it } }
-                item { CapabilityRow("Support mobile actions", mobileActions) { mobileActions = it } }
-                item { CapabilityRow("Support speculative decoding", speculative) { speculative = it } }
-                item { Text("Compatible accelerators") ; Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) { Accelerator.values().forEach { value -> FilterChip(selected = accelerator == value, onClick = { accelerator = value }, label = { Text(value.name) }) } } }
-            }
-        },
-        confirmButton = {
-            Button(enabled = !importing, onClick = { onImport(plan) }) {
-                if (importing) CircularProgressIndicator() else Text("Import")
-            }
-        },
-        dismissButton = { OutlinedButton(enabled = !importing, onClick = onCancel) { Text("Cancel") } }
-    )
+    AlertDialog(onDismissRequest = onCancel, title = { Text("Import Model") }, text = {
+        LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            item { Text("Name") ; Text(fileName) ; Text("Model type: LLM") }
+            item { Text("Max tokens: $maxTokens") ; Slider(value = maxTokens.toFloat(), onValueChange = { maxTokens = it.toInt() }, valueRange = 100f..4096f) }
+            item { Text("Top K: $topK") ; Slider(value = topK.toFloat(), onValueChange = { topK = it.toInt() }, valueRange = 1f..100f) }
+            item { Text("Top P: %.2f".format(topP)) ; Slider(value = topP.toFloat(), onValueChange = { topP = it.toDouble() }, valueRange = 0f..1f) }
+            item { Text("Temperature: %.2f".format(temperature)) ; Slider(value = temperature.toFloat(), onValueChange = { temperature = it.toDouble() }, valueRange = 0f..2f) }
+            item { CapabilityRow("Support image", image) { image = it } }
+            item { CapabilityRow("Support audio", audio) { audio = it } }
+            item { CapabilityRow("Support thinking", thinking) { thinking = it } }
+            item { CapabilityRow("Support mobile actions", mobileActions) { mobileActions = it } }
+            item { CapabilityRow("Support speculative decoding", speculative) { speculative = it } }
+            item { Text("Compatible accelerators") ; Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) { Accelerator.values().forEach { value -> FilterChip(selected = accelerator == value, onClick = { accelerator = value }, label = { Text(value.name) }) } } }
+        }
+    }, confirmButton = { Button(enabled = !importing, onClick = { onImport(plan) }) { if (importing) CircularProgressIndicator() else Text("Import") } }, dismissButton = { OutlinedButton(enabled = !importing, onClick = onCancel) { Text("Cancel") } })
 }
 
 @Composable

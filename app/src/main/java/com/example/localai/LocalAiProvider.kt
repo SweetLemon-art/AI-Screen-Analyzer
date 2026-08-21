@@ -26,11 +26,6 @@ class LocalAiProvider(
     private val _modelState = MutableStateFlow<LocalModelState>(LocalModelState.Idle)
     val modelState: StateFlow<LocalModelState> = _modelState.asStateFlow()
 
-    /**
-     * Selects a model safely. A model switch first requests cancellation of any
-     * active generation, then waits for the operation lock before replacing the
-     * runtime model. Selecting the already-loaded model is intentionally a no-op.
-     */
     suspend fun selectModel(modelId: String): Result<Unit> {
         val model = modelCatalog.listModels().firstOrNull { it.id == modelId }
             ?: run {
@@ -43,8 +38,6 @@ class LocalAiProvider(
             return Result.success(Unit)
         }
 
-        // Cancellation deliberately does not take operationMutex, so an active
-        // generation can be interrupted before the switch waits for cleanup.
         runtime.cancel()
 
         return operationMutex.withLock {
@@ -76,12 +69,10 @@ class LocalAiProvider(
                 emit(LocalAiEvent.Failed(IllegalStateException("No local model is selected")))
                 return@withLock
             }
-
             runtime.generate(prompt).collect { event -> emit(event) }
         }
     }
 
-    /** Generates a local multimodal response from the selected model and image bytes. */
     fun generate(prompt: String, imageBytes: ByteArray): Flow<LocalAiEvent> = flow {
         operationMutex.withLock {
             if (selectedModelId.get() == null) {
@@ -92,15 +83,10 @@ class LocalAiProvider(
                 emit(LocalAiEvent.Failed(IllegalArgumentException("Image bytes must not be empty")))
                 return@withLock
             }
-
             runtime.generate(prompt, imageBytes).collect { event -> emit(event) }
         }
     }
 
-    /**
-     * Cancellation must remain outside operationMutex so it can interrupt the
-     * generation that currently owns the mutex.
-     */
     suspend fun cancel() {
         runtime.cancel()
     }
@@ -111,10 +97,25 @@ class LocalAiProvider(
         _modelState.value = LocalModelState.Idle
     }
 
+    /** Deletes a model only after unloading it when it owns the active runtime. */
+    suspend fun deleteModel(modelId: String): Result<Unit> {
+        require(modelCatalog is LocalModelDeletionCatalog) {
+            "Local model catalog does not support deletion"
+        }
+
+        return operationMutex.withLock {
+            if (selectedModelId.get() == modelId) {
+                runtime.unload()
+                selectedModelId.set(null)
+                _modelState.value = LocalModelState.Idle
+            }
+            modelCatalog.deleteModel(modelId)
+        }
+    }
+
     fun selectedModelId(): String? = selectedModelId.get()
 }
 
-/** Observable lifecycle state for Local AI model ownership. */
 sealed interface LocalModelState {
     data object Idle : LocalModelState
     data class Switching(val fromModelId: String?, val toModelId: String) : LocalModelState
