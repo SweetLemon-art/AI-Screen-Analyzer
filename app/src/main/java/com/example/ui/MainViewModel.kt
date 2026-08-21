@@ -81,6 +81,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val isTestingConnection: StateFlow<Boolean> = _isTestingConnection.asStateFlow()
     private val _testResult = MutableStateFlow<ConnectionTestResult?>(null)
     val testResult: StateFlow<ConnectionTestResult?> = _testResult.asStateFlow()
+    private val modelDiscoveryCoordinator = ModelDiscoveryCoordinator()
     val monitoringState: StateFlow<MonitoringState> = controller.state
     val latestBitmap = controller.latestBitmap
     val latestResult: StateFlow<AnalysisResult?> = controller.latestResult
@@ -225,11 +226,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         } else _selectedModel.value = ""
     }
 
+    private suspend fun discoverModels(): Result<List<GeminiModel>> =
+        modelDiscoveryCoordinator.discover { visionAnalyzer.discoverModels() }
+
+    private suspend fun discoverModelsIfNeeded(): Result<Unit> =
+        modelDiscoveryCoordinator.discover {
+            if (_hasFreshModelDiscovery.value) {
+                Result.success(Unit)
+            } else {
+                visionAnalyzer.discoverModels().map {
+                    handleDiscoveredModels(it)
+                    Unit
+                }
+            }
+        }
+
     fun fetchAvailableModels() {
         if (_isTestingConnection.value) return
         viewModelScope.launch {
             _isTestingConnection.value = true
-            visionAnalyzer.discoverModels().onSuccess(::handleDiscoveredModels).onFailure { _modelValidationMessage.value = "Failed to refresh models: ${it.localizedMessage ?: "Network error"}" }
+            discoverModels()
+                .onSuccess(::handleDiscoveredModels)
+                .onFailure { _modelValidationMessage.value = "Failed to refresh models: ${it.localizedMessage ?: "Network error"}" }
             _isTestingConnection.value = false
         }
     }
@@ -261,9 +279,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             _isTestingConnection.value = true
             _testResult.value = null
-            val result = visionAnalyzer.testConnection()
-            _testResult.value = result
-            if (result is ConnectionTestResult.Success) handleDiscoveredModels(result.models)
+            val result = discoverModels()
+            _testResult.value = if (result.isSuccess) ConnectionTestResult.Success(result.getOrThrow()) else ConnectionTestResult.Error(result.exceptionOrNull()?.localizedMessage ?: "Network error")
+            if (result.isSuccess) handleDiscoveredModels(result.getOrThrow())
             _isTestingConnection.value = false
         }
     }
@@ -274,7 +292,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             if (!_hasFreshModelDiscovery.value) {
                 _modelValidationMessage.value = "Refreshing model discovery before starting monitoring..."
-                visionAnalyzer.discoverModels().onSuccess(::handleDiscoveredModels).onFailure { _modelValidationMessage.value = "DISCOVERY_FAILED: Cannot start monitoring. Model discovery failed: ${it.localizedMessage ?: "Network error"}"; return@launch }
+                discoverModelsIfNeeded().onFailure {
+                    _modelValidationMessage.value = "DISCOVERY_FAILED: Cannot start monitoring. Model discovery failed: ${it.localizedMessage ?: "Network error"}"
+                    return@launch
+                }
             }
             if (!_hasFreshModelDiscovery.value) { _modelValidationMessage.value = "DISCOVERY_REQUIRED: Model discovery must complete before monitoring can start."; return@launch }
             val currentSelected = _selectedModel.value
