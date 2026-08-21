@@ -42,10 +42,9 @@ class ScreenCaptureService : Service() {
         }
 
         fun stopService(context: Context) {
-            val intent = Intent(context, ScreenCaptureService::class.java).apply {
-                action = ACTION_STOP
-            }
-            context.startService(intent)
+            // Stopping a service must not start/revive it just to deliver a stop command.
+            // Directly stopping the service also works when the app is in the background.
+            context.stopService(Intent(context, ScreenCaptureService::class.java))
         }
     }
 
