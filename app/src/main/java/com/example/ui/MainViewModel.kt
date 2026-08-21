@@ -279,9 +279,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             _isTestingConnection.value = true
             _testResult.value = null
-            val result = discoverModels()
-            _testResult.value = if (result.isSuccess) ConnectionTestResult.Success(result.getOrThrow()) else ConnectionTestResult.Error(result.exceptionOrNull()?.localizedMessage ?: "Network error")
-            if (result.isSuccess) handleDiscoveredModels(result.getOrThrow())
+            val result = modelDiscoveryCoordinator.discover { visionAnalyzer.testConnection() }
+            _testResult.value = result
+            if (result is ConnectionTestResult.Success) handleDiscoveredModels(result.models)
             _isTestingConnection.value = false
         }
     }
