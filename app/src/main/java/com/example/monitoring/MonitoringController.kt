@@ -87,9 +87,7 @@ class MonitoringController(
         when (command) {
             is LifecycleCommand.Start -> {
                 val newSessionId = sessionCounter.incrementAndGet()
-                activeJob?.cancel()
-                try { activeJob?.join() } catch (_: CancellationException) { }
-                activeJob = null
+                stopActiveMonitoring()
                 if (newSessionId != sessionCounter.get()) return
                 _state.value = MonitoringState.Starting
                 activeJob = coroutineScope.launch {
@@ -111,9 +109,11 @@ class MonitoringController(
         sessionCounter.incrementAndGet()
         _state.value = MonitoringState.Stopping
         val job = activeJob
-        job?.cancel()
-        try { job?.join() } catch (_: CancellationException) { }
-        if (activeJob === job) activeJob = null
+        if (job != null) {
+            job.cancel()
+            try { job.join() } catch (_: CancellationException) { }
+            if (activeJob === job) activeJob = null
+        }
         _state.value = MonitoringState.Idle
     }
 
@@ -125,25 +125,7 @@ class MonitoringController(
     }
 
     fun stopMonitoring() {
-        val result = commandChannel.trySend(LifecycleCommand.Stop)
-        if (result.isFailure) {
-            sessionCounter.incrementAndGet()
-            _state.value = MonitoringState.Stopping
-            val job = activeJob
-            if (job == null) {
-                _state.value = MonitoringState.Idle
-                return
-            }
-            job.invokeOnCompletion {
-                if (activeJob === job) {
-                    activeJob = null
-                    if (_state.value is MonitoringState.Stopping) {
-                        _state.value = MonitoringState.Idle
-                    }
-                }
-            }
-            job.cancel()
-        }
+        commandChannel.trySend(LifecycleCommand.Stop)
     }
 
     private suspend fun runMonitoringLoop(
@@ -234,7 +216,7 @@ class MonitoringController(
     /**
      * Invalidate the current session and clear UI state immediately. The generation bump prevents
      * an in-flight capture/analysis from publishing stale state after resetState() returns. The
-     * queued Reset still performs serialized cancellation/join of the active monitoring Job.
+     * queued Reset performs serialized cancellation/join of the active monitoring Job.
      */
     fun resetState() {
         sessionCounter.incrementAndGet()
@@ -243,17 +225,7 @@ class MonitoringController(
         _latestResult.value = null
         _analysisCount.value = 0
         _lastCaptureTimestamp.value = null
-
-        val result = commandChannel.trySend(LifecycleCommand.Reset)
-        if (result.isFailure) {
-            val job = activeJob
-            if (job != null) {
-                job.invokeOnCompletion {
-                    if (activeJob === job) activeJob = null
-                }
-                job.cancel()
-            }
-        }
+        commandChannel.trySend(LifecycleCommand.Reset)
     }
 
     private companion object {
