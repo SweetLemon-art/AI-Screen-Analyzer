@@ -154,7 +154,7 @@ class LiteRtLmRuntime(context: Context) : LocalModelRuntime {
             emit(LocalAiEvent.Completed)
         } catch (error: CancellationException) {
             throw error
-        } catch (error: Throwable) {
+        } catch (error: Exception) {
             emit(LocalAiEvent.Failed(error))
         } finally {
             synchronized(lock) {
