@@ -47,27 +47,32 @@ class LiteRtLmRuntime(context: Context) : LocalModelRuntime {
 
                 val modelFile = File(appContext.filesDir, "local_models/${model.id}/${model.fileName}")
                 require(modelFile.isFile) { "Model file not found: ${model.fileName}" }
+                LocalModelValidator.validateFileName(model.fileName)
+                LocalModelValidator.validateConfiguration(model.configuration)
 
-                val backend = when (model.accelerator) {
-                    Accelerator.CPU -> Backend.CPU()
-                    Accelerator.GPU -> Backend.GPU()
-                    Accelerator.NPU -> Backend.NPU(appContext.applicationInfo.nativeLibraryDir)
-                }
-
-                val config = EngineConfig(
-                    modelPath = modelFile.absolutePath,
-                    backend = backend,
-                    visionBackend = if (model.capabilities.image) backend else null,
-                    maxNumImages = if (model.capabilities.image) 1 else null,
-                    cacheDir = appContext.cacheDir.absolutePath
-                )
-
+                val config = buildEngineConfig(model, modelFile, appContext)
                 val newEngine = Engine(config)
                 try {
                     newEngine.initialize()
                 } catch (error: Throwable) {
                     runCatching { newEngine.close() }
                     throw error
+                }
+
+                // A declared image capability is only accepted after LiteRT-LM successfully
+                // initializes the vision executor with image input enabled. The public Android
+                // API does not expose model capability metadata directly, so this is the
+                // strongest provider-side validation available without executing an inference.
+                if (model.capabilities.image) {
+                    try {
+                        newEngine.createConversation(ConversationConfig()).close()
+                    } catch (error: Throwable) {
+                        runCatching { newEngine.close() }
+                        throw IllegalStateException(
+                            "Local model declares image capability but its vision runtime could not be initialized",
+                            error
+                        )
+                    }
                 }
 
                 engine = newEngine
@@ -203,5 +208,22 @@ class LiteRtLmRuntime(context: Context) : LocalModelRuntime {
         runCatching { engine?.close() }
         engine = null
         loadedModel = null
+    }
+
+    private companion object {
+        fun buildEngineConfig(model: LocalModel, modelFile: File, context: Context): EngineConfig {
+            val backend = when (model.accelerator) {
+                Accelerator.CPU -> Backend.CPU()
+                Accelerator.GPU -> Backend.GPU()
+                Accelerator.NPU -> Backend.NPU(context.applicationInfo.nativeLibraryDir)
+            }
+            return EngineConfig(
+                modelPath = modelFile.absolutePath,
+                backend = backend,
+                visionBackend = if (model.capabilities.image) backend else null,
+                maxNumImages = if (model.capabilities.image) 1 else null,
+                cacheDir = context.cacheDir.absolutePath
+            )
+        }
     }
 }
