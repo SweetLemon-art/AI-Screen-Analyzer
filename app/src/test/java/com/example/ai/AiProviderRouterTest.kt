@@ -3,7 +3,10 @@ package com.example.ai
 import android.graphics.Bitmap
 import com.example.data.AnalysisContext
 import com.example.data.CaptureSettings
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.yield
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -76,6 +79,33 @@ class AiProviderRouterTest {
     }
 
     @Test
+    fun selectedProviderIsSnapshottedBeforeWaitingForAnalysisMutex() = runBlocking {
+        val firstGate = CompletableDeferred<Unit>()
+        val firstStarted = CompletableDeferred<Unit>()
+        val first = FakeProvider(AiProviderType.GEMINI, "gemini", firstGate, firstStarted)
+        val second = FakeProvider(AiProviderType.LOCAL, "local")
+        val router = AiProviderRouter(listOf(first, second))
+        val bitmap = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888)
+
+        val activeRequest = launch {
+            router.analyze(bitmap = bitmap, context = AnalysisContext.DEFAULT)
+        }
+        firstStarted.await()
+
+        // This request snapshots GEMINI while the mutex is occupied by the first request.
+        val queuedRequest = launch {
+            router.analyze(bitmap = bitmap, context = AnalysisContext.DEFAULT)
+        }
+        yield()
+
+        router.select(AiProviderType.LOCAL)
+        firstGate.complete(Unit)
+
+        assertEquals("gemini", queuedRequest.joinAndGetSummary())
+        activeRequest.join()
+    }
+
+    @Test
     fun cancelDelegatesToSelectedProvider() = runBlocking {
         val provider = FakeProvider(AiProviderType.LOCAL)
         val router = AiProviderRouter(listOf(provider), initialProvider = AiProviderType.LOCAL)
@@ -85,9 +115,16 @@ class AiProviderRouterTest {
         assertEquals(1, provider.cancelCount)
     }
 
+    private suspend fun kotlinx.coroutines.Job.joinAndGetSummary(): String {
+        join()
+        return (this as kotlinx.coroutines.Deferred<AnalysisResult>).await().summary
+    }
+
     private class FakeProvider(
         override val type: AiProviderType,
-        private val response: String = type.name
+        private val response: String = type.name,
+        private val gate: CompletableDeferred<Unit>? = null,
+        private val started: CompletableDeferred<Unit>? = null
     ) : AiProvider {
         var lastPrompt: String? = null
         var cancelCount = 0
@@ -99,6 +136,8 @@ class AiProviderRouterTest {
             userPrompt: String?
         ): AnalysisResult {
             lastPrompt = userPrompt
+            started?.complete(Unit)
+            gate?.await()
             return AnalysisResult(
                 contextName = context.name,
                 summary = response
