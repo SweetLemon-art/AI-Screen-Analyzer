@@ -40,6 +40,20 @@ class LocalAiProvider(
         runtime.generate(prompt).collect { event -> emit(event) }
     }
 
+    /** Generates a local multimodal response from the selected model and image bytes. */
+    fun generate(prompt: String, imageBytes: ByteArray): Flow<LocalAiEvent> = flow {
+        if (selectedModelId == null) {
+            emit(LocalAiEvent.Failed(IllegalStateException("No local model is selected")))
+            return@flow
+        }
+        if (imageBytes.isEmpty()) {
+            emit(LocalAiEvent.Failed(IllegalArgumentException("Image bytes must not be empty")))
+            return@flow
+        }
+
+        runtime.generate(prompt, imageBytes).collect { event -> emit(event) }
+    }
+
     suspend fun cancel() {
         runtime.cancel()
     }
