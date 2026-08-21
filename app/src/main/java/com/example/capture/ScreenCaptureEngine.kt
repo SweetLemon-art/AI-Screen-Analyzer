@@ -38,7 +38,8 @@ import kotlin.coroutines.resume
  *   preventing close/use races.
  * - Retired readers keep their listener until the owning capture finishes, preventing a resize
  *   or stop callback from racing with listener use on the old reader.
- * - Callbacks are explicitly bound to session generations to prevent stale callback pollution.
+ * - Callbacks are explicitly bound to session generations and reader identities to prevent
+ *   stale callback pollution after a resize or session replacement.
  * - Callbacks are unregistered before MediaProjection is stopped.
  * - [stop] is strictly idempotent and safe when called repeatedly.
  * - [captureSingleFrame] serializes frame capture with a Mutex.
@@ -46,6 +47,7 @@ import kotlin.coroutines.resume
 object ScreenCaptureEngine : ScreenCaptureProvider, ScreenCaptureLifecycleProvider {
 
     private val sessionGeneration = AtomicLong(0)
+    private val readerGeneration = AtomicLong(0)
 
     @Volatile
     private var mediaProjection: MediaProjection? = null
@@ -58,6 +60,9 @@ object ScreenCaptureEngine : ScreenCaptureProvider, ScreenCaptureLifecycleProvid
 
     @Volatile
     private var imageReader: ImageReader? = null
+
+    @Volatile
+    private var currentReaderGeneration: Long = 0L
 
     private val retiredReaders = mutableListOf<ImageReader>()
     private val activeCaptureCount = AtomicInteger(0)
@@ -88,16 +93,16 @@ object ScreenCaptureEngine : ScreenCaptureProvider, ScreenCaptureLifecycleProvid
     /**
      * Captures exactly one frame from the current ImageReader.
      *
-     * The reader is captured before suspending so a concurrent resize can retire the old reader
-     * without closing it until this capture has completed. The session generation prevents late
-     * frames from an old MediaProjection session from being returned.
+     * The reader and its generation are captured before suspending. A resize can retire that
+     * reader while this capture is active, but callbacks from the retired reader are rejected.
      */
     override suspend fun captureSingleFrame(): CaptureResult = captureMutex.withLock {
         val reader = imageReader
         val projection = mediaProjection
         val generation = sessionGeneration.get()
+        val capturedReaderGeneration = currentReaderGeneration
 
-        if (!_isReady.value || reader == null || projection == null) {
+        if (!_isReady.value || reader == null || projection == null || capturedReaderGeneration == 0L) {
             return@withLock CaptureResult.Error("Screen capture session is not ready")
         }
 
@@ -107,7 +112,12 @@ object ScreenCaptureEngine : ScreenCaptureProvider, ScreenCaptureLifecycleProvid
                 withTimeoutOrNull(CAPTURE_TIMEOUT_MS) {
                     suspendCancellableCoroutine<CaptureResult> { continuation ->
                         val listener = ImageReader.OnImageAvailableListener { availableReader ->
-                            if (generation != sessionGeneration.get() || !continuation.isActive) {
+                            if (
+                                generation != sessionGeneration.get() ||
+                                capturedReaderGeneration != currentReaderGeneration ||
+                                availableReader !== reader ||
+                                !continuation.isActive
+                            ) {
                                 return@OnImageAvailableListener
                             }
 
@@ -240,6 +250,7 @@ object ScreenCaptureEngine : ScreenCaptureProvider, ScreenCaptureLifecycleProvid
                 2
             )
             imageReader = reader
+            currentReaderGeneration = readerGeneration.incrementAndGet()
 
             val vDisplay = projection.createVirtualDisplay(
                 "AIScreenCaptureDisplay",
@@ -262,6 +273,7 @@ object ScreenCaptureEngine : ScreenCaptureProvider, ScreenCaptureLifecycleProvid
         } catch (e: Exception) {
             imageReader?.let(::closeReaderQuietly)
             imageReader = null
+            currentReaderGeneration = 0L
             false
         }
     }
@@ -296,6 +308,7 @@ object ScreenCaptureEngine : ScreenCaptureProvider, ScreenCaptureLifecycleProvid
             screenWidth = width
             screenHeight = height
             imageReader = newReader
+            currentReaderGeneration = readerGeneration.incrementAndGet()
 
             if (activeCaptureCount.get() == 0) {
                 closeReaderQuietly(oldReader)
@@ -347,6 +360,7 @@ object ScreenCaptureEngine : ScreenCaptureProvider, ScreenCaptureLifecycleProvid
     private fun cleanupResourcesInternal() {
         val currentReader = imageReader
         imageReader = null
+        currentReaderGeneration = 0L
 
         if (currentReader != null) {
             if (activeCaptureCount.get() == 0) {
