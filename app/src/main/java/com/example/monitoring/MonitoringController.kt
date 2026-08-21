@@ -4,6 +4,8 @@ import android.graphics.Bitmap
 import com.example.ai.AiProviderRouter
 import com.example.ai.AiProviderType
 import com.example.ai.AnalysisResult
+import com.example.ai.GeminiAiProvider
+import com.example.ai.VisionAnalyzer
 import com.example.capture.CaptureResult
 import com.example.capture.ScreenCaptureEngine
 import com.example.capture.ScreenCaptureLifecycleProvider
@@ -41,6 +43,20 @@ class MonitoringController(
     private val coroutineScope: CoroutineScope,
     private val captureProvider: ScreenCaptureProvider = ScreenCaptureEngine
 ) {
+    /**
+     * Compatibility constructor for legacy unit tests and callers that only provide Gemini.
+     * Production code should prefer the explicit AiProviderRouter constructor above.
+     */
+    constructor(
+        visionAnalyzer: VisionAnalyzer,
+        coroutineScope: CoroutineScope,
+        captureProvider: ScreenCaptureProvider = ScreenCaptureEngine
+    ) : this(
+        aiProviderRouter = AiProviderRouter(listOf(GeminiAiProvider(visionAnalyzer))),
+        coroutineScope = coroutineScope,
+        captureProvider = captureProvider
+    )
+
     private val _state = MutableStateFlow<MonitoringState>(MonitoringState.Idle)
     val state: StateFlow<MonitoringState> = _state.asStateFlow()
     private val _latestBitmap = MutableStateFlow<Bitmap?>(null)
@@ -126,7 +142,7 @@ class MonitoringController(
     fun startMonitoring(
         contextProvider: () -> AnalysisContext,
         settingsProvider: () -> CaptureSettings,
-        providerProvider: () -> AiProviderType
+        providerProvider: () -> AiProviderType = { AiProviderType.GEMINI }
     ) {
         commandChannel.trySend(LifecycleCommand.Start(contextProvider, settingsProvider, providerProvider))
     }
