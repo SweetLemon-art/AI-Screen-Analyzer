@@ -22,7 +22,8 @@ interface AiProvider {
     suspend fun analyze(
         bitmap: Bitmap,
         context: AnalysisContext,
-        settings: CaptureSettings = CaptureSettings.DEFAULT
+        settings: CaptureSettings = CaptureSettings.DEFAULT,
+        userPrompt: String? = null
     ): AnalysisResult
 }
 
@@ -40,8 +41,12 @@ class GeminiAiProvider(
     override suspend fun analyze(
         bitmap: Bitmap,
         context: AnalysisContext,
-        settings: CaptureSettings
-    ): AnalysisResult = delegate.analyze(bitmap, context, settings)
+        settings: CaptureSettings,
+        userPrompt: String?
+    ): AnalysisResult {
+        val effectiveContext = context.withUserPrompt(userPrompt)
+        return delegate.analyze(bitmap, effectiveContext, settings)
+    }
 }
 
 /**
@@ -57,7 +62,8 @@ class LocalAiScreenProvider(
     override suspend fun analyze(
         bitmap: Bitmap,
         context: AnalysisContext,
-        settings: CaptureSettings
+        settings: CaptureSettings,
+        userPrompt: String?
     ): AnalysisResult {
         val startTime = System.currentTimeMillis()
         if (bitmap.isRecycled || bitmap.width <= 0 || bitmap.height <= 0) {
@@ -71,7 +77,8 @@ class LocalAiScreenProvider(
                 quality = settings.compressionQuality
             )
             val imageBytes = Base64.decode(base64, Base64.DEFAULT)
-            val prompt = buildPrompt(context)
+            val effectiveContext = context.withUserPrompt(userPrompt)
+            val prompt = buildPrompt(effectiveContext)
             var rawResponse = ""
             var failure: Throwable? = null
 
@@ -196,6 +203,14 @@ class AiProviderRouter(
     suspend fun analyze(
         bitmap: Bitmap,
         context: AnalysisContext,
-        settings: CaptureSettings = CaptureSettings.DEFAULT
-    ): AnalysisResult = providersByType.getValue(selected).analyze(bitmap, context, settings)
+        settings: CaptureSettings = CaptureSettings.DEFAULT,
+        userPrompt: String? = null
+    ): AnalysisResult = providersByType.getValue(selected).analyze(bitmap, context, settings, userPrompt)
+}
+
+private fun AnalysisContext.withUserPrompt(userPrompt: String?): AnalysisContext {
+    val prompt = userPrompt?.trim().orEmpty()
+    if (prompt.isBlank()) return this
+    val separator = if (instructions.isBlank()) "" else "\n\n"
+    return copy(instructions = "$instructions${separator}User question: $prompt")
 }
