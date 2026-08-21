@@ -57,6 +57,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _isAskingAi = MutableStateFlow(false)
     val isAskingAi: StateFlow<Boolean> = _isAskingAi.asStateFlow()
     private var askAiJob: Job? = null
+    private var activeAskAiProvider: AiProviderType? = null
 
     val controller = MonitoringController(visionAnalyzer, viewModelScope)
     val rateLimitState: StateFlow<RateLimitState> = visionAnalyzer.rateLimitState
@@ -135,10 +136,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             )
             return
         }
+        val providerType = _selectedAiProvider.value
+        activeAskAiProvider = providerType
         askAiJob = viewModelScope.launch {
             _isAskingAi.value = true
             try {
-                if (_selectedAiProvider.value == AiProviderType.LOCAL) {
+                if (providerType == AiProviderType.LOCAL) {
                     val localModel = localModelRepository.listModels().firstOrNull { it.capabilities.image }
                     if (localModel == null) {
                         _askAiResult.value = AnalysisResult(
@@ -186,6 +189,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             } finally {
                 _isAskingAi.value = false
                 askAiJob = null
+                activeAskAiProvider = null
             }
         }
     }
@@ -197,8 +201,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      */
     fun cancelAskAi() {
         if (askAiJob?.isActive != true) return
-        viewModelScope.launch {
-            runCatching { aiProviderRouter.cancel() }
+        val providerType = activeAskAiProvider
+        if (providerType != null) {
+            viewModelScope.launch {
+                runCatching { aiProviderRouter.cancel(providerType) }
+            }
         }
         askAiJob?.cancel()
     }
@@ -387,6 +394,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     override fun onCleared() {
+        if (askAiJob?.isActive == true) {
+            val providerType = activeAskAiProvider
+            if (providerType != null) {
+                viewModelScope.launch {
+                    runCatching { aiProviderRouter.cancel(providerType) }
+                }
+            }
+        }
         askAiJob?.cancel()
         controller.stopMonitoring()
         ScreenCaptureEngine.stop()
