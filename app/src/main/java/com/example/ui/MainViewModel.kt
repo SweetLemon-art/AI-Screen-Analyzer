@@ -15,6 +15,7 @@ import com.example.ai.GeminiModel
 import com.example.ai.GeminiVisionAnalyzer
 import com.example.ai.LocalAiScreenProvider
 import com.example.ai.RateLimitState
+import com.example.ai.normalizeModelId
 import com.example.capture.ScreenCaptureEngine
 import com.example.capture.ScreenCaptureService
 import com.example.data.AnalysisContext
@@ -202,23 +203,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Stops both the Kotlin Ask AI coroutine and any provider-native operation.
-     * The provider cancellation runs in a sibling ViewModel coroutine so it remains
-     * executable after askAiJob is cancelled.
+     * Cancels the active Ask AI request through coroutine cancellation.
+     * Provider implementations attach their native cancellation to the same coroutine,
+     * so there is no sibling cancellation race and admission is released only by the
+     * request's own finally block after provider cleanup has completed.
      */
     fun cancelAskAi() {
-        if (askAiJob?.isActive != true) return
-        val providerType = activeAskAiProvider
-        if (providerType != null) {
-            viewModelScope.launch {
-                runCatching { aiProviderRouter.cancel(providerType) }
-            }
-        }
         askAiJob?.cancel()
     }
 
     fun selectModel(modelId: String) {
-        val cleanModel = com.example.ai.normalizeModelId(modelId)
+        val cleanModel = normalizeModelId(modelId)
         if (cleanModel.isBlank()) {
             clearSelectedModel()
             return
@@ -226,7 +221,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val matched = _discoveredModels.value.find {
             it.canonicalModelId == cleanModel ||
                 it.modelId == cleanModel ||
-                com.example.ai.normalizeModelId(it.name) == cleanModel
+                normalizeModelId(it.name) == cleanModel
         }
         if (matched != null) {
             _selectedModel.value = matched.canonicalModelId
@@ -261,7 +256,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val matchingModel = compatibleModels.find {
                 it.canonicalModelId == persistedSelected ||
                     it.modelId == persistedSelected ||
-                    com.example.ai.normalizeModelId(it.name) == persistedSelected
+                    normalizeModelId(it.name) == persistedSelected
             }
             if (matchingModel != null) {
                 _selectedModel.value = matchingModel.canonicalModelId
@@ -404,9 +399,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         askAiJob?.cancel()
         askAiAdmission.release()
         controller.stopMonitoring()
-        // ViewModel destruction must also terminate the independent foreground
-        // capture service so MediaProjection cannot outlive its UI owner.
-        ScreenCaptureService.stopService(getApplication<Application>())
+        getApplication<Application>().let { application ->
+            ScreenCaptureService.stopService(application)
+        }
         ScreenCaptureEngine.stop()
         super.onCleared()
     }
