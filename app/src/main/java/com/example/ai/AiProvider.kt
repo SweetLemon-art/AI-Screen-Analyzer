@@ -10,6 +10,8 @@ import com.example.localai.LocalAiProvider
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
@@ -207,6 +209,7 @@ class AiProviderRouter(
     initialProvider: AiProviderType = AiProviderType.GEMINI
 ) {
     private val providersByType = providers.associateBy { it.type }
+    private val analysisMutex = Mutex()
     private var selected: AiProviderType = initialProvider
 
     init {
@@ -231,11 +234,15 @@ class AiProviderRouter(
         context: AnalysisContext,
         settings: CaptureSettings = CaptureSettings.DEFAULT,
         userPrompt: String? = null
-    ): AnalysisResult = providersByType.getValue(selected).analyze(bitmap, context, settings, userPrompt)
+    ): AnalysisResult = analysisMutex.withLock {
+        providersByType.getValue(selected).analyze(bitmap, context, settings, userPrompt)
+    }
 
     suspend fun cancel() = cancel(selected)
 
     suspend fun cancel(type: AiProviderType) {
+        // Cancellation must not wait for analysisMutex: it is the mechanism used
+        // to release an analysis currently holding that mutex.
         providersByType.getValue(type).cancel()
     }
 }
