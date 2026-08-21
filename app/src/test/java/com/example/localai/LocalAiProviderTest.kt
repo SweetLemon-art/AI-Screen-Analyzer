@@ -19,6 +19,11 @@ class LocalAiProviderTest {
         importedAtEpochMillis = 1L
     )
 
+    private val visionModel = model.copy(
+        id = "vision-model",
+        capabilities = ModelCapabilities(image = true)
+    )
+
     @Test
     fun selectModelLoadsInstalledModel() = runBlocking {
         val runtime = FakeRuntime()
@@ -69,6 +74,35 @@ class LocalAiProviderTest {
     }
 
     @Test
+    fun generateImageDelegatesPromptAndBytesToRuntime() = runBlocking {
+        val runtime = FakeRuntime()
+        val provider = LocalAiProvider(FakeCatalog(listOf(visionModel)), runtime)
+        provider.selectModel("vision-model")
+        val image = byteArrayOf(1, 2, 3, 4)
+
+        val events = provider.generate("describe this", image).toList()
+
+        assertEquals(
+            listOf(LocalAiEvent.Started, LocalAiEvent.Token("describe this"), LocalAiEvent.Completed),
+            events
+        )
+        assertEquals("describe this", runtime.lastPrompt)
+        assertTrue(runtime.lastImageBytes!!.contentEquals(image))
+    }
+
+    @Test
+    fun generateImageRejectsEmptyBytes() = runBlocking {
+        val runtime = FakeRuntime()
+        val provider = LocalAiProvider(FakeCatalog(listOf(visionModel)), runtime)
+        provider.selectModel("vision-model")
+
+        val events = provider.generate("describe this", byteArrayOf()).toList()
+
+        assertEquals(1, events.size)
+        assertTrue(events.single() is LocalAiEvent.Failed)
+    }
+
+    @Test
     fun unloadClearsSelectedModelAndDelegates() = runBlocking {
         val runtime = FakeRuntime()
         val provider = LocalAiProvider(FakeCatalog(listOf(model)), runtime)
@@ -89,6 +123,7 @@ class LocalAiProviderTest {
     private class FakeRuntime : LocalModelRuntime {
         var loadedModel: LocalModel? = null
         var lastPrompt: String? = null
+        var lastImageBytes: ByteArray? = null
         var unloaded = false
 
         override suspend fun load(model: LocalModel): Result<Unit> {
@@ -98,12 +133,21 @@ class LocalAiProviderTest {
 
         override fun generate(prompt: String): Flow<LocalAiEvent> {
             lastPrompt = prompt
-            return flowOf(
-                LocalAiEvent.Started,
-                LocalAiEvent.Token(prompt),
-                LocalAiEvent.Completed
-            )
+            lastImageBytes = null
+            return response(prompt)
         }
+
+        override fun generate(prompt: String, imageBytes: ByteArray): Flow<LocalAiEvent> {
+            lastPrompt = prompt
+            lastImageBytes = imageBytes
+            return response(prompt)
+        }
+
+        private fun response(prompt: String): Flow<LocalAiEvent> = flowOf(
+            LocalAiEvent.Started,
+            LocalAiEvent.Token(prompt),
+            LocalAiEvent.Completed
+        )
 
         override suspend fun unload() {
             unloaded = true
