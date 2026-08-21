@@ -43,7 +43,7 @@ import kotlin.coroutines.resume
  * - [stop] is strictly idempotent and safe when called repeatedly.
  * - [captureSingleFrame] serializes frame capture with a Mutex.
  */
-object ScreenCaptureEngine : ScreenCaptureProvider {
+object ScreenCaptureEngine : ScreenCaptureProvider, ScreenCaptureLifecycleProvider {
 
     private val sessionGeneration = AtomicLong(0)
 
@@ -73,10 +73,17 @@ object ScreenCaptureEngine : ScreenCaptureProvider {
     private var onProjectionStopCallback: (() -> Unit)? = null
 
     @Volatile
+    private var onSessionStoppedListener: (() -> Unit)? = null
+
+    @Volatile
     private var sessionContext: Context? = null
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val captureMutex = Mutex()
+
+    override fun setOnSessionStoppedListener(listener: (() -> Unit)?) {
+        onSessionStoppedListener = listener
+    }
 
     @Synchronized
     fun initialize(
@@ -168,7 +175,6 @@ object ScreenCaptureEngine : ScreenCaptureProvider {
                     override fun onResumed() {}
                     override fun onStopped() {
                         super.onStopped()
-                        // MediaProjection.Callback.onStop() is the authoritative session-stop signal.
                     }
                 },
                 mainHandler
@@ -206,8 +212,6 @@ object ScreenCaptureEngine : ScreenCaptureProvider {
         }
 
         try {
-            // Android 14+ requires resizing the existing VirtualDisplay rather than
-            // creating another VirtualDisplay from the same MediaProjection session.
             display.resize(width, height, screenDensity)
             display.setSurface(newReader.surface)
 
@@ -215,8 +219,6 @@ object ScreenCaptureEngine : ScreenCaptureProvider {
             screenHeight = height
             imageReader = newReader
 
-            // Do not close or clear oldReader while a capture may still own it.
-            // Retain it until activeCaptureCount reaches zero.
             if (activeCaptureCount.get() == 0) {
                 closeReaderQuietly(oldReader)
             } else {
@@ -260,88 +262,7 @@ object ScreenCaptureEngine : ScreenCaptureProvider {
         val callback = onProjectionStopCallback
         onProjectionStopCallback = null
         callback?.invoke()
-    }
-
-    override suspend fun captureSingleFrame(): CaptureResult = withContext(Dispatchers.Default) {
-        captureMutex.withLock {
-            val reader: ImageReader? = synchronized(this@ScreenCaptureEngine) {
-                val currentReader = imageReader
-                val projection = mediaProjection
-                val vDisplay = virtualDisplay
-
-                if (currentReader == null || projection == null || vDisplay == null || !_isReady.value) {
-                    null
-                } else {
-                    activeCaptureCount.incrementAndGet()
-                    currentReader
-                }
-            }
-
-            if (reader == null) {
-                return@withLock CaptureResult.Error("Screen capture session is not active or permission was revoked.")
-            }
-
-            try {
-                val immediateImage = try {
-                    reader.acquireLatestImage()
-                } catch (e: Exception) {
-                    null
-                }
-
-                if (immediateImage != null) {
-                    val bitmap = ImageProcessor.convertImageToBitmap(immediateImage)
-                    return@withLock if (bitmap != null) {
-                        CaptureResult.Success(bitmap)
-                    } else {
-                        CaptureResult.Error("Failed to convert captured frame buffer to Bitmap.")
-                    }
-                }
-
-                val capturedBitmap = withTimeoutOrNull(3000L) {
-                    suspendCancellableCoroutine<Bitmap?> { cont ->
-                        val listener = ImageReader.OnImageAvailableListener { r ->
-                            try {
-                                val img = r.acquireLatestImage()
-                                if (img != null) {
-                                    r.setOnImageAvailableListener(null, null)
-                                    val bmp = ImageProcessor.convertImageToBitmap(img)
-                                    if (cont.isActive) {
-                                        cont.resume(bmp)
-                                    } else {
-                                        bmp?.let { if (!it.isRecycled) it.recycle() }
-                                    }
-                                }
-                            } catch (e: Exception) {
-                                if (cont.isActive) cont.resume(null)
-                            }
-                        }
-
-                        reader.setOnImageAvailableListener(listener, mainHandler)
-                        cont.invokeOnCancellation {
-                            try {
-                                reader.setOnImageAvailableListener(null, null)
-                            } catch (ignored: Exception) {
-                            }
-                        }
-                    }
-                }
-
-                if (capturedBitmap != null) {
-                    CaptureResult.Success(capturedBitmap)
-                } else {
-                    CaptureResult.Error("Timeout waiting for display frame.")
-                }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                CaptureResult.Error("Screen capture error: ${e.localizedMessage ?: e.message}")
-            } finally {
-                synchronized(this@ScreenCaptureEngine) {
-                    activeCaptureCount.decrementAndGet()
-                    closeRetiredReadersIfIdle()
-                }
-            }
-        }
+        onSessionStoppedListener?.invoke()
     }
 
     @Synchronized
@@ -349,8 +270,6 @@ object ScreenCaptureEngine : ScreenCaptureProvider {
         val currentReader = imageReader
         imageReader = null
 
-        // A capture may already own currentReader. Retire it instead of closing it
-        // immediately; the capture's finally block will close it once ownership ends.
         if (currentReader != null) {
             if (activeCaptureCount.get() == 0) {
                 closeReaderQuietly(currentReader)
