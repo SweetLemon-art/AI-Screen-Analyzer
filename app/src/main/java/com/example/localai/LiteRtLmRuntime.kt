@@ -9,6 +9,7 @@ import com.google.ai.edge.litertlm.ConversationConfig
 import com.google.ai.edge.litertlm.Engine
 import com.google.ai.edge.litertlm.EngineConfig
 import com.google.ai.edge.litertlm.SamplerConfig
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.collect
@@ -151,6 +152,10 @@ class LiteRtLmRuntime(context: Context) : LocalModelRuntime {
                 emit(LocalAiEvent.Token(message.toString()))
             }
             emit(LocalAiEvent.Completed)
+        } catch (error: CancellationException) {
+            // Coroutine cancellation is control flow, not an inference failure.
+            // Propagate it so timeout/stop/unload can terminate the flow promptly.
+            throw error
         } catch (error: Throwable) {
             emit(LocalAiEvent.Failed(error))
         } finally {
