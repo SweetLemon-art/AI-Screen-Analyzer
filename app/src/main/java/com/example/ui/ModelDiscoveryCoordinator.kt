@@ -10,6 +10,6 @@ import kotlinx.coroutines.sync.withLock
 internal class ModelDiscoveryCoordinator {
     private val mutex = Mutex()
 
-    suspend fun <T> discover(block: suspend () -> Result<T>): Result<T> =
+    suspend fun <T> discover(block: suspend () -> T): T =
         mutex.withLock { block() }
 }
