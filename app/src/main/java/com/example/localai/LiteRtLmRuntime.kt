@@ -10,6 +10,7 @@ import com.google.ai.edge.litertlm.Engine
 import com.google.ai.edge.litertlm.EngineConfig
 import com.google.ai.edge.litertlm.SamplerConfig
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.collect
@@ -30,6 +31,9 @@ class LiteRtLmRuntime(context: Context) : LocalModelRuntime {
 
     @Volatile
     private var loadedModel: LocalModel? = null
+
+    @Volatile
+    private var generationCompletion: CompletableDeferred<Unit>? = null
 
     override suspend fun load(model: LocalModel): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching {
@@ -85,9 +89,8 @@ class LiteRtLmRuntime(context: Context) : LocalModelRuntime {
 
         var setupError: Throwable? = null
         var activeConversation: Conversation? = null
+        val completion = CompletableDeferred<Unit>()
 
-        // Protect only the short-lived state transition. Never call emit() while
-        // holding this monitor because emit is a suspension point.
         synchronized(lock) {
             val currentEngine = engine
             val currentModel = loadedModel
@@ -108,9 +111,6 @@ class LiteRtLmRuntime(context: Context) : LocalModelRuntime {
                     setupError = IllegalStateException("A local AI generation is already running")
                 }
                 else -> {
-                    // LiteRT-LM 0.14.0 supports sampling configuration here.
-                    // maxOutputToken is a per-message option in newer APIs, not a
-                    // ConversationConfig option in the dependency used by this app.
                     val conversationConfig = ConversationConfig(
                         samplerConfig = SamplerConfig(
                             topK = currentModel.configuration.topK,
@@ -121,11 +121,13 @@ class LiteRtLmRuntime(context: Context) : LocalModelRuntime {
                     val createdConversation = currentEngine.createConversation(conversationConfig)
                     activeConversation = createdConversation
                     conversation = createdConversation
+                    generationCompletion = completion
                 }
             }
         }
 
         setupError?.let {
+            completion.complete(Unit)
             emit(LocalAiEvent.Failed(it))
             return@flow
         }
@@ -138,8 +140,6 @@ class LiteRtLmRuntime(context: Context) : LocalModelRuntime {
             val responseFlow = if (imageBytes == null) {
                 runningConversation.sendMessageAsync(prompt)
             } else {
-                // Text is placed before the image so the prompt is explicit and
-                // the multimodal payload stays deterministic across providers.
                 runningConversation.sendMessageAsync(
                     Contents.of(
                         Content.Text(prompt),
@@ -153,16 +153,16 @@ class LiteRtLmRuntime(context: Context) : LocalModelRuntime {
             }
             emit(LocalAiEvent.Completed)
         } catch (error: CancellationException) {
-            // Coroutine cancellation is control flow, not an inference failure.
-            // Propagate it so timeout/stop/unload can terminate the flow promptly.
             throw error
         } catch (error: Throwable) {
             emit(LocalAiEvent.Failed(error))
         } finally {
             synchronized(lock) {
                 if (conversation === runningConversation) conversation = null
+                if (generationCompletion === completion) generationCompletion = null
             }
             runCatching { runningConversation.close() }
+            completion.complete(Unit)
         }
     }
 
@@ -172,17 +172,22 @@ class LiteRtLmRuntime(context: Context) : LocalModelRuntime {
                 conversation
             } ?: return@withContext
 
-            // The generate() flow owns the conversation lifetime. Cancel the native
-            // operation here and let generate() close the conversation in finally.
             runCatching { activeConversation.cancelProcess() }
         }
     }
 
     override suspend fun unload(): Unit {
         withContext(Dispatchers.IO) {
-            val activeConversation = synchronized(lock) { conversation }
+            val activeConversation: Conversation?
+            val completion: CompletableDeferred<Unit>?
+            synchronized(lock) {
+                activeConversation = conversation
+                completion = generationCompletion
+            }
+
             if (activeConversation != null) {
                 runCatching { activeConversation.cancelProcess() }
+                completion?.await()
             }
 
             synchronized(lock) {
@@ -194,6 +199,7 @@ class LiteRtLmRuntime(context: Context) : LocalModelRuntime {
     private fun closeLocked() {
         runCatching { conversation?.close() }
         conversation = null
+        generationCompletion = null
         runCatching { engine?.close() }
         engine = null
         loadedModel = null
