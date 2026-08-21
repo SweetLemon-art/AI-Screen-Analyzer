@@ -4,6 +4,7 @@ import android.graphics.Bitmap
 import com.example.data.AnalysisContext
 import com.example.data.CaptureSettings
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.yield
@@ -93,7 +94,7 @@ class AiProviderRouterTest {
         firstStarted.await()
 
         // This request snapshots GEMINI while the mutex is occupied by the first request.
-        val queuedRequest = launch {
+        val queuedRequest = async {
             router.analyze(bitmap = bitmap, context = AnalysisContext.DEFAULT)
         }
         yield()
@@ -101,7 +102,7 @@ class AiProviderRouterTest {
         router.select(AiProviderType.LOCAL)
         firstGate.complete(Unit)
 
-        assertEquals("gemini", queuedRequest.joinAndGetSummary())
+        assertEquals("gemini", queuedRequest.await().summary)
         activeRequest.join()
     }
 
@@ -113,11 +114,6 @@ class AiProviderRouterTest {
         router.cancel()
 
         assertEquals(1, provider.cancelCount)
-    }
-
-    private suspend fun kotlinx.coroutines.Job.joinAndGetSummary(): String {
-        join()
-        return (this as kotlinx.coroutines.Deferred<AnalysisResult>).await().summary
     }
 
     private class FakeProvider(
