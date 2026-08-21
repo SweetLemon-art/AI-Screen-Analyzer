@@ -233,8 +233,10 @@ class AiProviderRouter(
         userPrompt: String? = null
     ): AnalysisResult = providersByType.getValue(selected).analyze(bitmap, context, settings, userPrompt)
 
-    suspend fun cancel() {
-        providersByType.getValue(selected).cancel()
+    suspend fun cancel() = cancel(selected)
+
+    suspend fun cancel(type: AiProviderType) {
+        providersByType.getValue(type).cancel()
     }
 }
 
