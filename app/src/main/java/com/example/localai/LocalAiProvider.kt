@@ -21,6 +21,11 @@ class LocalAiProvider(
         val model = modelCatalog.listModels().firstOrNull { it.id == modelId }
             ?: return Result.failure(IllegalArgumentException("Local model not found: $modelId"))
 
+        // LiteRtLmRuntime closes the previous engine before initializing a new
+        // model. Clear the provider selection first so a failed load cannot leave
+        // the provider claiming that an unavailable model is still active.
+        selectedModelId = null
+
         return runtime.load(model).onSuccess {
             selectedModelId = model.id
         }
