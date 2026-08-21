@@ -2,6 +2,8 @@ package com.example.localai
 
 import android.content.Context
 import com.google.ai.edge.litertlm.Backend
+import com.google.ai.edge.litertlm.Content
+import com.google.ai.edge.litertlm.Contents
 import com.google.ai.edge.litertlm.Conversation
 import com.google.ai.edge.litertlm.ConversationConfig
 import com.google.ai.edge.litertlm.Engine
@@ -50,6 +52,8 @@ class LiteRtLmRuntime(context: Context) : LocalModelRuntime {
                 val config = EngineConfig(
                     modelPath = modelFile.absolutePath,
                     backend = backend,
+                    visionBackend = if (model.capabilities.image) backend else null,
+                    maxNumImages = if (model.capabilities.image) 1 else null,
                     cacheDir = appContext.cacheDir.absolutePath
                 )
 
@@ -67,8 +71,16 @@ class LiteRtLmRuntime(context: Context) : LocalModelRuntime {
         }
     }
 
-    override fun generate(prompt: String): Flow<LocalAiEvent> = flow {
+    override fun generate(prompt: String): Flow<LocalAiEvent> = generateInternal(prompt, null)
+
+    override fun generate(prompt: String, imageBytes: ByteArray): Flow<LocalAiEvent> =
+        generateInternal(prompt, imageBytes)
+
+    private fun generateInternal(prompt: String, imageBytes: ByteArray?): Flow<LocalAiEvent> = flow {
         require(prompt.isNotBlank()) { "Prompt must not be blank" }
+        if (imageBytes != null) {
+            require(imageBytes.isNotEmpty()) { "Image bytes must not be empty" }
+        }
 
         var setupError: Throwable? = null
         var activeConversation: Conversation? = null
@@ -86,15 +98,18 @@ class LiteRtLmRuntime(context: Context) : LocalModelRuntime {
                 !currentEngine.isInitialized() -> {
                     setupError = IllegalStateException("Local model engine is not initialized")
                 }
+                imageBytes != null && !currentModel.capabilities.image -> {
+                    setupError = IllegalArgumentException(
+                        "The selected local model does not declare image capability"
+                    )
+                }
                 conversation != null -> {
                     setupError = IllegalStateException("A local AI generation is already running")
                 }
                 else -> {
                     // LiteRT-LM 0.14.0 supports sampling configuration here.
-                    // maxOutputToken is not part of the 0.14.0 ConversationConfig API,
-                    // so do not pass it here; the engine/model default remains in charge
-                    // of the output budget until the dependency is upgraded to an API
-                    // that exposes a per-conversation output-token override.
+                    // maxOutputToken is a per-message option in newer APIs, not a
+                    // ConversationConfig option in the dependency used by this app.
                     val conversationConfig = ConversationConfig(
                         samplerConfig = SamplerConfig(
                             topK = currentModel.configuration.topK,
@@ -119,7 +134,20 @@ class LiteRtLmRuntime(context: Context) : LocalModelRuntime {
         emit(LocalAiEvent.Started)
 
         try {
-            runningConversation.sendMessageAsync(prompt).collect { message ->
+            val responseFlow = if (imageBytes == null) {
+                runningConversation.sendMessageAsync(prompt)
+            } else {
+                // Text is placed before the image so the prompt is explicit and
+                // the multimodal payload stays deterministic across providers.
+                runningConversation.sendMessageAsync(
+                    Contents.of(
+                        Content.Text(prompt),
+                        Content.ImageBytes(imageBytes)
+                    )
+                )
+            }
+
+            responseFlow.collect { message ->
                 emit(LocalAiEvent.Token(message.toString()))
             }
             emit(LocalAiEvent.Completed)
