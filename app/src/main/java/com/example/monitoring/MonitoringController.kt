@@ -110,9 +110,10 @@ class MonitoringController(
     private suspend fun stopActiveMonitoring() {
         sessionCounter.incrementAndGet()
         _state.value = MonitoringState.Stopping
-        activeJob?.cancel()
-        try { activeJob?.join() } catch (_: CancellationException) { }
-        activeJob = null
+        val job = activeJob
+        job?.cancel()
+        try { job?.join() } catch (_: CancellationException) { }
+        if (activeJob === job) activeJob = null
         _state.value = MonitoringState.Idle
     }
 
@@ -128,9 +129,20 @@ class MonitoringController(
         if (result.isFailure) {
             sessionCounter.incrementAndGet()
             _state.value = MonitoringState.Stopping
-            activeJob?.cancel()
-            activeJob = null
-            _state.value = MonitoringState.Idle
+            val job = activeJob
+            if (job == null) {
+                _state.value = MonitoringState.Idle
+                return
+            }
+            job.invokeOnCompletion {
+                if (activeJob === job) {
+                    activeJob = null
+                    if (_state.value is MonitoringState.Stopping) {
+                        _state.value = MonitoringState.Idle
+                    }
+                }
+            }
+            job.cancel()
         }
     }
 
@@ -234,8 +246,13 @@ class MonitoringController(
 
         val result = commandChannel.trySend(LifecycleCommand.Reset)
         if (result.isFailure) {
-            activeJob?.cancel()
-            activeJob = null
+            val job = activeJob
+            if (job != null) {
+                job.invokeOnCompletion {
+                    if (activeJob === job) activeJob = null
+                }
+                job.cancel()
+            }
         }
     }
 
