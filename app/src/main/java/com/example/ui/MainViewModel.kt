@@ -394,14 +394,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     override fun onCleared() {
-        if (askAiJob?.isActive == true) {
-            val providerType = activeAskAiProvider
-            if (providerType != null) {
-                viewModelScope.launch {
-                    runCatching { aiProviderRouter.cancel(providerType) }
-                }
-            }
-        }
         askAiJob?.cancel()
         controller.stopMonitoring()
         ScreenCaptureEngine.stop()
