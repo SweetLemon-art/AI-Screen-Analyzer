@@ -191,7 +191,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (_hasFreshModelDiscovery.value) Result.success(Unit) else visionAnalyzer.discoverModels().map { handleDiscoveredModels(it); Unit }
     }
 
-    private suspend fun prepareMonitoringProvider(providerType: AiProviderType): Result<Unit> {
+    internal suspend fun prepareMonitoringProvider(providerType: AiProviderType): Result<Unit> {
         return when (providerType) {
             AiProviderType.GEMINI -> {
                 if (!apiKeyStore.hasApiKey()) return Result.failure(IllegalStateException("Gemini API key is required."))
