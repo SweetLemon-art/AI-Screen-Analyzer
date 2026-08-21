@@ -52,6 +52,14 @@ class MonitoringController(
     private val _state = MutableStateFlow<MonitoringState>(MonitoringState.Idle)
     val state: StateFlow<MonitoringState> = _state.asStateFlow()
 
+    /**
+     * UI-owned preview snapshot.
+     *
+     * The controller owns a reference to only the current preview bitmap. Replacing the StateFlow
+     * value intentionally drops the controller's reference to the previous preview; the previous
+     * bitmap must NOT be manually recycled here because Compose/RenderThread may still be using it.
+     * Once the UI releases it, normal Bitmap/GC lifecycle can reclaim it.
+     */
     private val _latestBitmap = MutableStateFlow<Bitmap?>(null)
     val latestBitmap: StateFlow<Bitmap?> = _latestBitmap.asStateFlow()
 
@@ -155,9 +163,14 @@ class MonitoringController(
      *
      * Bitmap ownership rule:
      * - captureProvider transfers ownership of a successful capture bitmap here.
-     * - A downscaled preview is retained for the UI when possible.
+     * - A separate downscaled preview is retained for the UI when possible.
      * - The full-resolution analysis bitmap is recycled after AI processing finishes,
-     *   including cancellation/error paths, unless it is also the UI preview bitmap.
+     *   including cancellation/error paths.
+     * - A failed preview conversion never exposes the full-resolution analysis bitmap to the UI;
+     *   this keeps the large analysis buffer eligible for immediate cleanup after inference.
+     * - Replaced UI preview bitmaps are NOT manually recycled by the controller because Compose/
+     *   RenderThread may still be using the previous snapshot. Replacing the StateFlow drops the
+     *   controller's ownership and the UI/GC lifecycle owns the remaining reference.
      */
     private suspend fun runMonitoringLoop(
         sessionId: Long,
@@ -204,7 +217,7 @@ class MonitoringController(
                     previewBitmap = try {
                         ImageProcessor.createPreviewBitmap(analysisBitmap)
                     } catch (_: Exception) {
-                        analysisBitmap
+                        null
                     }
 
                     if (sessionId != sessionCounter.get() || !currentCoroutineContext().isActive) return
@@ -236,7 +249,7 @@ class MonitoringController(
                         delay(1000L)
                     }
                 } finally {
-                    if (analysisBitmap != null && analysisBitmap !== previewBitmap && !analysisBitmap.isRecycled) {
+                    if (analysisBitmap != null && !analysisBitmap.isRecycled) {
                         analysisBitmap.recycle()
                     }
                 }
