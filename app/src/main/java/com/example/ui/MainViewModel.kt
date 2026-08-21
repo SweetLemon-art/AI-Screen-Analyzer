@@ -109,13 +109,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val prompt = question.trim()
         if (prompt.isBlank()) {
             askAiAdmission.release()
-            _askAiResult.value = AnalysisResult(_currentContext.value.name, "ASK_AI_ERROR", listOf("Question must not be blank."), "Enter a question before asking AI.", isSuccess = false, errorMessage = "Question must not be blank.")
+            _askAiResult.value = AnalysisResult(_currentContext.value.name, System.currentTimeMillis(), "ASK_AI_ERROR", listOf("Question must not be blank."), "Enter a question before asking AI.", isSuccess = false, errorMessage = "Question must not be blank.")
             return
         }
         val bitmap = latestBitmap.value
         if (bitmap == null || bitmap.isRecycled || bitmap.width <= 0 || bitmap.height <= 0) {
             askAiAdmission.release()
-            _askAiResult.value = AnalysisResult(_currentContext.value.name, "ASK_AI_ERROR", listOf("No valid captured screen is available."), "Start monitoring once to capture a screen before asking AI.", isSuccess = false, errorMessage = "No valid captured screen is available.")
+            _askAiResult.value = AnalysisResult(_currentContext.value.name, System.currentTimeMillis(), "ASK_AI_ERROR", listOf("No valid captured screen is available."), "Start monitoring once to capture a screen before asking AI.", isSuccess = false, errorMessage = "No valid captured screen is available.")
             return
         }
         val providerType = _selectedAiProvider.value
@@ -126,13 +126,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 if (providerType == AiProviderType.LOCAL) {
                     val localModel = localModelRepository.listModels().firstOrNull { it.capabilities.image }
                     if (localModel == null) {
-                        _askAiResult.value = AnalysisResult(_currentContext.value.name, "LOCAL_AI_ERROR", listOf("No imported local model with image capability is available."), "Import an image-capable LiteRT-LM model in Local AI first.", isSuccess = false, errorMessage = "No image-capable local model is available.")
+                        _askAiResult.value = AnalysisResult(_currentContext.value.name, System.currentTimeMillis(), "LOCAL_AI_ERROR", listOf("No imported local model with image capability is available."), "Import an image-capable LiteRT-LM model in Local AI first.", isSuccess = false, errorMessage = "No image-capable local model is available.")
                         return@launch
                     }
                     val loadResult = localAiProvider.selectModel(localModel.id)
                     if (loadResult.isFailure) {
                         val message = loadResult.exceptionOrNull()?.message ?: "Failed to load local model."
-                        _askAiResult.value = AnalysisResult(_currentContext.value.name, "LOCAL_AI_ERROR", listOf(message), "Check the imported model and try again.", isSuccess = false, errorMessage = message)
+                        _askAiResult.value = AnalysisResult(_currentContext.value.name, System.currentTimeMillis(), "LOCAL_AI_ERROR", listOf(message), "Check the imported model and try again.", isSuccess = false, errorMessage = message)
                         return@launch
                     }
                 }
@@ -140,7 +140,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             } catch (_: CancellationException) {
             } catch (error: Exception) {
                 val message = error.localizedMessage ?: error.message ?: "AI request failed."
-                _askAiResult.value = AnalysisResult(_currentContext.value.name, "ASK_AI_ERROR", listOf(message), "Try again or switch AI providers.", isSuccess = false, errorMessage = message)
+                _askAiResult.value = AnalysisResult(_currentContext.value.name, System.currentTimeMillis(), "ASK_AI_ERROR", listOf(message), "Try again or switch AI providers.", isSuccess = false, errorMessage = message)
             } finally {
                 _isAskingAi.value = false
                 askAiJob = null
