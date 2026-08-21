@@ -5,16 +5,23 @@ import android.content.Context
 import android.content.Intent
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.ai.AiProviderRouter
+import com.example.ai.AiProviderType
 import com.example.ai.AnalysisResult
 import com.example.ai.ConnectionTestResult
+import com.example.ai.GeminiAiProvider
 import com.example.ai.GeminiModel
 import com.example.ai.GeminiVisionAnalyzer
+import com.example.ai.LocalAiScreenProvider
 import com.example.ai.RateLimitState
 import com.example.capture.ScreenCaptureEngine
 import com.example.capture.ScreenCaptureService
 import com.example.data.AnalysisContext
 import com.example.data.CaptureSettings
 import com.example.data.SettingsRepository
+import com.example.localai.LiteRtLmRuntime
+import com.example.localai.LocalAiProvider
+import com.example.localai.LocalModelRepository
 import com.example.monitoring.MonitoringController
 import com.example.monitoring.MonitoringState
 import com.example.security.GeminiApiKeyStore
@@ -41,6 +48,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         modelProvider = { _selectedModel.value },
         compatibleModelsProvider = { _discoveredModels.value }
     )
+    private val localModelRepository = LocalModelRepository(application)
+    private val localAiProvider = LocalAiProvider(
+        modelCatalog = localModelRepository,
+        runtime = LiteRtLmRuntime(application)
+    )
+    private val aiProviderRouter = AiProviderRouter(
+        providers = listOf(
+            GeminiAiProvider(visionAnalyzer),
+            LocalAiScreenProvider(localAiProvider)
+        ),
+        initialProvider = AiProviderType.GEMINI
+    )
+    private val _selectedAiProvider = MutableStateFlow(AiProviderType.GEMINI)
+    val selectedAiProvider: StateFlow<AiProviderType> = _selectedAiProvider.asStateFlow()
+    private val _askAiResult = MutableStateFlow<AnalysisResult?>(null)
+    val askAiResult: StateFlow<AnalysisResult?> = _askAiResult.asStateFlow()
+    private val _isAskingAi = MutableStateFlow(false)
+    val isAskingAi: StateFlow<Boolean> = _isAskingAi.asStateFlow()
+
     val controller = MonitoringController(visionAnalyzer, viewModelScope)
     val rateLimitState: StateFlow<RateLimitState> = visionAnalyzer.rateLimitState
     private val _savedContexts = MutableStateFlow(settingsRepository.loadContexts())
@@ -81,6 +107,90 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun navigateTo(route: ScreenRoute) { _currentRoute.value = route }
     fun dismissModelValidationMessage() { _modelValidationMessage.value = null }
+
+    fun selectAiProvider(type: AiProviderType) {
+        aiProviderRouter.select(type).onSuccess { _selectedAiProvider.value = type }
+    }
+
+    fun askAi(question: String) {
+        val prompt = question.trim()
+        if (prompt.isBlank()) {
+            _askAiResult.value = AnalysisResult(
+                contextName = _currentContext.value.name,
+                summary = "ASK_AI_ERROR",
+                observations = listOf("Question must not be blank."),
+                conclusion = "Enter a question before asking AI.",
+                isSuccess = false,
+                errorMessage = "Question must not be blank."
+            )
+            return
+        }
+
+        val bitmap = latestBitmap.value
+        if (bitmap == null || bitmap.isRecycled || bitmap.width <= 0 || bitmap.height <= 0) {
+            _askAiResult.value = AnalysisResult(
+                contextName = _currentContext.value.name,
+                summary = "ASK_AI_ERROR",
+                observations = listOf("No valid captured screen is available."),
+                conclusion = "Start monitoring once to capture a screen before asking AI.",
+                isSuccess = false,
+                errorMessage = "No valid captured screen is available."
+            )
+            return
+        }
+
+        viewModelScope.launch {
+            _isAskingAi.value = true
+            try {
+                if (_selectedAiProvider.value == AiProviderType.LOCAL) {
+                    val localModel = localModelRepository.listModels()
+                        .firstOrNull { it.capabilities.image }
+                    if (localModel == null) {
+                        _askAiResult.value = AnalysisResult(
+                            contextName = _currentContext.value.name,
+                            summary = "LOCAL_AI_ERROR",
+                            observations = listOf("No imported local model with image capability is available."),
+                            conclusion = "Import an image-capable LiteRT-LM model in Local AI first.",
+                            isSuccess = false,
+                            errorMessage = "No image-capable local model is available."
+                        )
+                        return@launch
+                    }
+
+                    val loadResult = localAiProvider.selectModel(localModel.id)
+                    if (loadResult.isFailure) {
+                        _askAiResult.value = AnalysisResult(
+                            contextName = _currentContext.value.name,
+                            summary = "LOCAL_AI_ERROR",
+                            observations = listOf(loadResult.exceptionOrNull()?.message ?: "Failed to load local model."),
+                            conclusion = "Check the imported model and try again.",
+                            isSuccess = false,
+                            errorMessage = loadResult.exceptionOrNull()?.message
+                        )
+                        return@launch
+                    }
+                }
+
+                _askAiResult.value = aiProviderRouter.analyze(
+                    bitmap = bitmap,
+                    context = _currentContext.value,
+                    settings = _settings.value.copy(delaySeconds = 1)
+                )
+            } catch (error: Exception) {
+                _askAiResult.value = AnalysisResult(
+                    contextName = _currentContext.value.name,
+                    summary = "ASK_AI_ERROR",
+                    observations = listOf(error.localizedMessage ?: "AI request failed."),
+                    conclusion = "Try again or switch AI providers.",
+                    isSuccess = false,
+                    errorMessage = error.localizedMessage ?: error.message
+                )
+            } finally {
+                _isAskingAi.value = false
+            }
+        }
+    }
+
     fun selectModel(modelId: String) {
         val cleanModel = com.example.ai.normalizeModelId(modelId)
         if (cleanModel.isBlank()) { clearSelectedModel(); return }
@@ -137,4 +247,4 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     override fun onCleared() { controller.stopMonitoring(); ScreenCaptureEngine.stop(); super.onCleared() }
 }
 
-enum class ScreenRoute(val title: String) { HOME("Home"), MONITOR("Monitor"), CONTEXT("Context"), SETTINGS("Settings"), LOCAL_AI("Local AI") }
+enum class ScreenRoute(val title: String) { HOME("Home"), MONITOR("Monitor"), ASK_AI("Ask AI"), CONTEXT("Context"), SETTINGS("Settings"), LOCAL_AI("Local AI") }
