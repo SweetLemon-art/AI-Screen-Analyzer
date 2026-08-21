@@ -165,12 +165,14 @@ class MonitoringController(
      * - captureProvider transfers ownership of a successful capture bitmap here.
      * - A separate downscaled preview is retained for the UI when possible.
      * - The full-resolution analysis bitmap is recycled after AI processing finishes,
-     *   including cancellation/error paths.
+     *   including cancellation/error paths, when it is not the bitmap currently exposed to UI.
      * - A failed preview conversion never exposes the full-resolution analysis bitmap to the UI;
      *   this keeps the large analysis buffer eligible for immediate cleanup after inference.
+     * - If preview generation intentionally returns the source bitmap (no scaling required), that
+     *   bitmap remains UI-owned and is not manually recycled by the controller.
      * - Replaced UI preview bitmaps are NOT manually recycled by the controller because Compose/
      *   RenderThread may still be using the previous snapshot. Replacing the StateFlow drops the
-     *   controller's ownership and the UI/GC lifecycle owns the remaining reference.
+     *   controller's reference and the UI/GC lifecycle owns the remaining reference.
      */
     private suspend fun runMonitoringLoop(
         sessionId: Long,
@@ -249,7 +251,7 @@ class MonitoringController(
                         delay(1000L)
                     }
                 } finally {
-                    if (analysisBitmap != null && !analysisBitmap.isRecycled) {
+                    if (analysisBitmap != null && analysisBitmap !== previewBitmap && !analysisBitmap.isRecycled) {
                         analysisBitmap.recycle()
                     }
                 }
