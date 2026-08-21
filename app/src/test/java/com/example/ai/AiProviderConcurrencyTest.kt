@@ -55,7 +55,16 @@ class AiProviderConcurrencyTest {
         val first = async { router.analyze(bitmap, context, CaptureSettings.DEFAULT) }
         gemini.firstStarted.await()
 
-        val queued = async { router.analyze(bitmap, context, CaptureSettings.DEFAULT) }
+        // Explicitly pin the queued request to GEMINI before it waits for the
+        // mutex. Changing the router selection afterward must not retarget it.
+        val queued = async {
+            router.analyze(
+                AiProviderType.GEMINI,
+                bitmap,
+                context,
+                CaptureSettings.DEFAULT
+            )
+        }
         router.select(AiProviderType.LOCAL)
 
         gemini.release()
