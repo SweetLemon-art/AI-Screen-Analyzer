@@ -12,10 +12,9 @@ import com.example.capture.ScreenCaptureProvider
 import com.example.data.AnalysisContext
 import com.example.data.CaptureSettings
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runCurrent
@@ -23,13 +22,13 @@ import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
-@OptIn(ExperimentalCoroutinesApi::class)
+@kotlinx.coroutines.ExperimentalCoroutinesApi
 class MonitoringControllerLifecycleTest {
 
     @Test
     fun externalCaptureSessionStop_stopsActiveMonitoring() = runTest {
         val provider = LifecycleAwareCaptureProvider()
-        val controller = createController(provider)
+        val controller = createController(provider, this)
 
         controller.startMonitoring(
             contextProvider = { AnalysisContext.DEFAULT },
@@ -42,13 +41,12 @@ class MonitoringControllerLifecycleTest {
         runCurrent()
 
         assertEquals(MonitoringState.Idle, controller.state.value)
-        testScope.cancel()
     }
 
     @Test
     fun resetState_clearsStateOnlyAfterActiveJobStops() = runTest {
         val provider = LifecycleAwareCaptureProvider()
-        val controller = createController(provider)
+        val controller = createController(provider, this)
 
         controller.startMonitoring(
             contextProvider = { AnalysisContext.DEFAULT },
@@ -64,12 +62,12 @@ class MonitoringControllerLifecycleTest {
         assertEquals(null, controller.latestResult.value)
         assertEquals(0, controller.analysisCount.value)
         assertEquals(null, controller.lastCaptureTimestamp.value)
-        testScope.cancel()
     }
 
-    private lateinit var testScope: TestScope
-
-    private fun createController(provider: LifecycleAwareCaptureProvider): MonitoringController {
+    private fun createController(
+        provider: LifecycleAwareCaptureProvider,
+        testScope: TestScope
+    ): MonitoringController {
         val dispatcher = StandardTestDispatcher(testScope.testScheduler)
         return MonitoringController(FakeVisionAnalyzer(), CoroutineScope(dispatcher), provider)
     }
@@ -83,7 +81,7 @@ class MonitoringControllerLifecycleTest {
         }
 
         override suspend fun captureSingleFrame(): CaptureResult =
-            kotlinx.coroutines.suspendCancellableCoroutine { }
+            suspendCancellableCoroutine { }
 
         fun emitSessionStopped() {
             listener?.invoke()
