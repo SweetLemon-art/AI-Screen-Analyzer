@@ -8,7 +8,9 @@ import com.example.image.ImageProcessor
 import com.example.localai.LocalAiEvent
 import com.example.localai.LocalAiProvider
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
@@ -27,6 +29,12 @@ interface AiProvider {
         settings: CaptureSettings = CaptureSettings.DEFAULT,
         userPrompt: String? = null
     ): AnalysisResult
+
+    /**
+     * Cancels provider-native work when the caller explicitly stops an analysis.
+     * Providers without a separate native cancellation primitive can keep the default no-op.
+     */
+    suspend fun cancel() = Unit
 }
 
 enum class AiProviderType {
@@ -104,17 +112,25 @@ class LocalAiScreenProvider(
                 )
             }
             if (!completed) {
+                // Timeout cancels the coroutine, but the native LiteRT-LM operation
+                // also needs an explicit cancellation signal before returning.
+                withContext(NonCancellable) { delegate.cancel() }
                 return failure(context, startTime, "Local AI generation timed out")
             }
 
             parseResponse(context, startTime, rawResponse)
         } catch (error: CancellationException) {
-            // Cancellation is control flow and must not be converted into a normal
-            // AnalysisResult failure. This preserves timeout and stop semantics.
+            // Explicit UI cancellation and lifecycle cancellation must stop the
+            // native LiteRT-LM process as well as the Kotlin coroutine.
+            withContext(NonCancellable) { delegate.cancel() }
             throw error
         } catch (error: Exception) {
             failure(context, startTime, error.message ?: "Local AI analysis failed")
         }
+    }
+
+    override suspend fun cancel() {
+        withContext(NonCancellable) { delegate.cancel() }
     }
 
     private fun buildPrompt(context: AnalysisContext): String = buildString {
@@ -216,6 +232,10 @@ class AiProviderRouter(
         settings: CaptureSettings = CaptureSettings.DEFAULT,
         userPrompt: String? = null
     ): AnalysisResult = providersByType.getValue(selected).analyze(bitmap, context, settings, userPrompt)
+
+    suspend fun cancel() {
+        providersByType.getValue(selected).cancel()
+    }
 }
 
 private fun AnalysisContext.withUserPrompt(userPrompt: String?): AnalysisContext {
