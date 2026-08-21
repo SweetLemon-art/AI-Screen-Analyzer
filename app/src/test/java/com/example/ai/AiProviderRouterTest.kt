@@ -61,17 +61,37 @@ class AiProviderRouterTest {
         assertEquals("second", result.summary)
     }
 
+    @Test
+    fun analyzeForwardsUserPromptToSelectedProvider() = runBlocking {
+        val provider = FakeProvider(AiProviderType.LOCAL)
+        val router = AiProviderRouter(listOf(provider), initialProvider = AiProviderType.LOCAL)
+
+        router.analyze(
+            bitmap = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888),
+            context = AnalysisContext.DEFAULT,
+            userPrompt = "What error is visible?"
+        )
+
+        assertEquals("What error is visible?", provider.lastPrompt)
+    }
+
     private class FakeProvider(
         override val type: AiProviderType,
         private val response: String = type.name
     ) : AiProvider {
+        var lastPrompt: String? = null
+
         override suspend fun analyze(
             bitmap: Bitmap,
             context: AnalysisContext,
-            settings: CaptureSettings
-        ): AnalysisResult = AnalysisResult(
-            contextName = context.name,
-            summary = response
-        )
+            settings: CaptureSettings,
+            userPrompt: String?
+        ): AnalysisResult {
+            lastPrompt = userPrompt
+            return AnalysisResult(
+                contextName = context.name,
+                summary = response
+            )
+        }
     }
 }
