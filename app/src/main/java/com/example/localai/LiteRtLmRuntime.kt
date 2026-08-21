@@ -90,13 +90,17 @@ class LiteRtLmRuntime(context: Context) : LocalModelRuntime {
                     setupError = IllegalStateException("A local AI generation is already running")
                 }
                 else -> {
+                    // LiteRT-LM 0.14.0 supports sampling configuration here.
+                    // maxOutputToken is not part of the 0.14.0 ConversationConfig API,
+                    // so do not pass it here; the engine/model default remains in charge
+                    // of the output budget until the dependency is upgraded to an API
+                    // that exposes a per-conversation output-token override.
                     val conversationConfig = ConversationConfig(
                         samplerConfig = SamplerConfig(
                             topK = currentModel.configuration.topK,
                             topP = currentModel.configuration.topP,
                             temperature = currentModel.configuration.temperature
-                        ),
-                        maxOutputToken = currentModel.configuration.maxTokens
+                        )
                     )
                     val createdConversation = currentEngine.createConversation(conversationConfig)
                     activeConversation = createdConversation
@@ -115,8 +119,6 @@ class LiteRtLmRuntime(context: Context) : LocalModelRuntime {
         emit(LocalAiEvent.Started)
 
         try {
-            // LiteRT-LM provides a coroutine-friendly Flow overload when no callback
-            // argument is supplied. Sampling and max output tokens are configured above.
             runningConversation.sendMessageAsync(prompt).collect { message ->
                 emit(LocalAiEvent.Token(message.toString()))
             }
@@ -131,24 +133,28 @@ class LiteRtLmRuntime(context: Context) : LocalModelRuntime {
         }
     }
 
-    override suspend fun cancel() = withContext(Dispatchers.IO) {
-        val activeConversation = synchronized(lock) {
-            conversation
-        } ?: return@withContext
+    override suspend fun cancel(): Unit {
+        withContext(Dispatchers.IO) {
+            val activeConversation = synchronized(lock) {
+                conversation
+            } ?: return@withContext
 
-        // The generate() flow owns the conversation lifetime. Cancel the native
-        // operation here and let generate() close the conversation in finally.
-        runCatching { activeConversation.cancelProcess() }
-    }
-
-    override suspend fun unload() = withContext(Dispatchers.IO) {
-        val activeConversation = synchronized(lock) { conversation }
-        if (activeConversation != null) {
+            // The generate() flow owns the conversation lifetime. Cancel the native
+            // operation here and let generate() close the conversation in finally.
             runCatching { activeConversation.cancelProcess() }
         }
+    }
 
-        synchronized(lock) {
-            closeLocked()
+    override suspend fun unload(): Unit {
+        withContext(Dispatchers.IO) {
+            val activeConversation = synchronized(lock) { conversation }
+            if (activeConversation != null) {
+                runCatching { activeConversation.cancelProcess() }
+            }
+
+            synchronized(lock) {
+                closeLocked()
+            }
         }
     }
 
