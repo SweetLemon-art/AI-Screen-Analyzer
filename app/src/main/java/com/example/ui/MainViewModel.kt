@@ -31,6 +31,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import java.util.concurrent.atomic.AtomicBoolean
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     val apiKeyStore = GeminiApiKeyStore(application)
@@ -56,6 +57,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val askAiResult: StateFlow<AnalysisResult?> = _askAiResult.asStateFlow()
     private val _isAskingAi = MutableStateFlow(false)
     val isAskingAi: StateFlow<Boolean> = _isAskingAi.asStateFlow()
+    private val askAiAdmission = AtomicBoolean(false)
     private var askAiJob: Job? = null
     private var activeAskAiProvider: AiProviderType? = null
 
@@ -111,9 +113,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun askAi(question: String) {
-        if (askAiJob?.isActive == true) return
+        if (!askAiAdmission.compareAndSet(false, true)) return
+
         val prompt = question.trim()
         if (prompt.isBlank()) {
+            askAiAdmission.set(false)
             _askAiResult.value = AnalysisResult(
                 contextName = _currentContext.value.name,
                 summary = "ASK_AI_ERROR",
@@ -126,6 +130,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         val bitmap = latestBitmap.value
         if (bitmap == null || bitmap.isRecycled || bitmap.width <= 0 || bitmap.height <= 0) {
+            askAiAdmission.set(false)
             _askAiResult.value = AnalysisResult(
                 contextName = _currentContext.value.name,
                 summary = "ASK_AI_ERROR",
@@ -169,6 +174,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
                 _askAiResult.value = aiProviderRouter.analyze(
+                    providerType,
                     bitmap,
                     _currentContext.value,
                     _settings.value.copy(delaySeconds = 1),
@@ -190,6 +196,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _isAskingAi.value = false
                 askAiJob = null
                 activeAskAiProvider = null
+                askAiAdmission.set(false)
             }
         }
     }
@@ -395,6 +402,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     override fun onCleared() {
         askAiJob?.cancel()
+        askAiAdmission.set(false)
         controller.stopMonitoring()
         ScreenCaptureEngine.stop()
         super.onCleared()
