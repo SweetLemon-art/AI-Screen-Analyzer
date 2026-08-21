@@ -24,7 +24,7 @@ class LocalAiFatalErrorRegressionTest {
         provider.selectModel(model.id)
 
         assertThrows(AssertionError::class.java) {
-            runBlocking { provider.generate("hello").toList() }
+            provider.generate("hello").toList()
         }
     }
 
