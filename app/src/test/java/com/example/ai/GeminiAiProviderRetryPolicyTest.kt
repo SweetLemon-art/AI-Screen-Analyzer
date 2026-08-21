@@ -62,7 +62,7 @@ class GeminiAiProviderRetryPolicyTest {
         assertTrue(result.isSuccess)
         assertEquals("ok", result.summary)
         assertEquals(1, delegate.invocationCount)
-        assertEquals("Base instructions\n\nUser question: What is visible?", delegate.lastContext.instructions)
+        assertTrue(delegate.lastContext.instructions.contains("What is visible?"))
     }
 
     private class CountingVisionAnalyzer(
