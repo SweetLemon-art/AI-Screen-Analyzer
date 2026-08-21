@@ -86,9 +86,6 @@ class MonitoringController(
     private suspend fun handleLifecycleCommand(command: LifecycleCommand) {
         when (command) {
             is LifecycleCommand.Start -> {
-                // Stop and fully join the previous session before allocating the new generation.
-                // The cleanup increments sessionCounter, so the new session ID must be allocated
-                // only after cleanup; otherwise the cleanup would invalidate the new ID itself.
                 stopActiveMonitoring()
                 val newSessionId = sessionCounter.incrementAndGet()
                 _state.value = MonitoringState.Starting
@@ -98,11 +95,8 @@ class MonitoringController(
             }
             is LifecycleCommand.Stop -> stopActiveMonitoring()
             is LifecycleCommand.Reset -> {
-                // Reset is serialized with the active job. Observable state has already been
-                // invalidated synchronously by resetState(); this command only performs the
-                // deterministic cancellation/join cleanup and clears again for idempotence.
                 stopActiveMonitoring()
-                _latestBitmap.value = null
+                clearLatestBitmap()
                 _latestResult.value = null
                 _analysisCount.value = 0
                 _lastCaptureTimestamp.value = null
@@ -163,6 +157,7 @@ class MonitoringController(
                 _state.value = MonitoringState.Capturing
                 var analysisBitmap: Bitmap? = null
                 var previewBitmap: Bitmap? = null
+                var previewPublished = false
                 try {
                     val captureResult = captureProvider.captureSingleFrame()
                     if (sessionId != sessionCounter.get() || !currentCoroutineContext().isActive) return
@@ -177,7 +172,8 @@ class MonitoringController(
                     }
                     previewBitmap = try { ImageProcessor.createPreviewBitmap(analysisBitmap) } catch (_: Exception) { null }
                     if (sessionId != sessionCounter.get() || !currentCoroutineContext().isActive) return
-                    _latestBitmap.value = previewBitmap
+                    publishLatestBitmap(previewBitmap)
+                    previewPublished = previewBitmap != null
                     _lastCaptureTimestamp.value = System.currentTimeMillis()
                     if (sessionId != sessionCounter.get() || !currentCoroutineContext().isActive) return
                     val currentContext = contextProvider()
@@ -201,8 +197,11 @@ class MonitoringController(
                         delay(1000L)
                     }
                 } finally {
-                    if (analysisBitmap != null && analysisBitmap !== previewBitmap && !analysisBitmap.isRecycled) {
+                    if (analysisBitmap != null && !analysisBitmap.isRecycled) {
                         analysisBitmap.recycle()
+                    }
+                    if (!previewPublished && previewBitmap != null && !previewBitmap.isRecycled) {
+                        previewBitmap.recycle()
                     }
                 }
             }
@@ -223,6 +222,22 @@ class MonitoringController(
         }
     }
 
+    private fun publishLatestBitmap(newBitmap: Bitmap?) {
+        val previousBitmap = _latestBitmap.value
+        _latestBitmap.value = newBitmap
+        if (previousBitmap != null && previousBitmap !== newBitmap && !previousBitmap.isRecycled) {
+            previousBitmap.recycle()
+        }
+    }
+
+    private fun clearLatestBitmap() {
+        val previousBitmap = _latestBitmap.value
+        _latestBitmap.value = null
+        if (previousBitmap != null && !previousBitmap.isRecycled) {
+            previousBitmap.recycle()
+        }
+    }
+
     /**
      * Invalidate the current session and clear observable state immediately. The generation bump
      * prevents an in-flight capture/analysis from publishing stale values after resetState() returns.
@@ -231,7 +246,7 @@ class MonitoringController(
     fun resetState() {
         sessionCounter.incrementAndGet()
         _state.value = MonitoringState.Idle
-        _latestBitmap.value = null
+        clearLatestBitmap()
         _latestResult.value = null
         _analysisCount.value = 0
         _lastCaptureTimestamp.value = null
