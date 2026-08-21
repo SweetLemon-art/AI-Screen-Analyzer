@@ -23,6 +23,7 @@ import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNotSame
 import org.junit.Test
 
 @kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -130,12 +131,14 @@ class MonitoringControllerLifecycleTest {
     }
 
     @Test
-    fun previewContract_returnsSourceWhenNoDownscaleIsNeeded() {
+    fun previewContract_returnsIndependentBitmapWhenNoDownscaleIsNeeded() {
         val source = Bitmap.createBitmap(100, 100, Bitmap.Config.ARGB_8888)
         try {
             val preview = ImageProcessor.createPreviewBitmap(source, maxDimension = 720)
-            assertEquals(source, preview)
+            assertNotSame(source, preview)
             assertFalse(preview.isRecycled)
+            assertFalse(source.isRecycled)
+            preview.recycle()
         } finally {
             if (!source.isRecycled) source.recycle()
         }
