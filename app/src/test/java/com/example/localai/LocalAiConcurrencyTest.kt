@@ -25,10 +25,13 @@ class LocalAiConcurrencyTest {
         val runtime = BlockingRuntime()
         val provider = LocalAiProvider(FakeCatalog(model), runtime)
         provider.selectModel(model.id)
+        runtime.loadCalls.set(0)
 
         val first = async { provider.generate("first", byteArrayOf(1)).collect {} }
+        while (runtime.active.get() == 0) delay(1)
         val second = async { provider.generate("second", byteArrayOf(2)).collect {} }
 
+        runtime.release()
         first.await()
         second.await()
 
@@ -41,6 +44,7 @@ class LocalAiConcurrencyTest {
         val runtime = BlockingRuntime()
         val provider = LocalAiProvider(FakeCatalog(model), runtime)
         provider.selectModel(model.id)
+        runtime.loadCalls.set(0)
 
         val generation = async { provider.generate("first", byteArrayOf(1)).collect {} }
         while (runtime.active.get() == 0) delay(1)
