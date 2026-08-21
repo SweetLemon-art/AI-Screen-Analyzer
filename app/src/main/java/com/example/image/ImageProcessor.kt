@@ -27,8 +27,6 @@ object ImageProcessor {
             val pixelStride = plane.pixelStride
             val rowStride = plane.rowStride
 
-            // ImageReader should provide valid RGBA plane metadata. Reject malformed
-            // metadata instead of risking division-by-zero or invalid allocations.
             if (pixelStride <= 0 || rowStride <= 0 || rowStride < pixelStride * image.width) {
                 return null
             }
@@ -46,13 +44,7 @@ object ImageProcessor {
             tempBitmap.copyPixelsFromBuffer(buffer)
 
             if (bitmapWidth != image.width) {
-                val cleanBitmap = Bitmap.createBitmap(
-                    tempBitmap,
-                    0,
-                    0,
-                    image.width,
-                    image.height
-                )
+                val cleanBitmap = Bitmap.createBitmap(tempBitmap, 0, 0, image.width, image.height)
                 tempBitmap.recycle()
                 tempBitmap = null
                 cleanBitmap
@@ -73,11 +65,8 @@ object ImageProcessor {
     }
 
     /**
-     * Creates a UI preview that is independent from the analysis bitmap when downscaling
-     * is required. The returned bitmap is owned by the caller.
-     *
-     * If no downscale is required, the source is returned unchanged so no unnecessary
-     * duplicate allocation is made. In that case the caller must retain ownership of source.
+     * Creates a UI preview with ownership independent from the analysis bitmap.
+     * The returned bitmap is always a distinct allocation owned by the caller.
      */
     fun createPreviewBitmap(
         source: Bitmap,
@@ -93,7 +82,7 @@ object ImageProcessor {
         }
 
         if (width <= maxDimension && height <= maxDimension) {
-            return source
+            return source.copy(source.config ?: Bitmap.Config.ARGB_8888, false)
         }
 
         val scale = min(
@@ -112,7 +101,6 @@ object ImageProcessor {
      * Ownership:
      * - The caller owns [rawBitmap] and this method NEVER recycles it.
      * - Any temporary scaled bitmap is recycled before returning or throwing.
-     * - The byte-array/JPEG buffers are released when this method returns.
      */
     fun processForGeminiBase64(
         rawBitmap: Bitmap,
@@ -146,14 +134,9 @@ object ImageProcessor {
         return try {
             ByteArrayOutputStream().use { outputStream ->
                 val clampedQuality = quality.coerceIn(40, 100)
-                check(
-                    bitmapToCompress.compress(
-                        Bitmap.CompressFormat.JPEG,
-                        clampedQuality,
-                        outputStream
-                    )
-                ) { "Bitmap JPEG compression failed" }
-
+                check(bitmapToCompress.compress(Bitmap.CompressFormat.JPEG, clampedQuality, outputStream)) {
+                    "Bitmap JPEG compression failed"
+                }
                 Base64.encodeToString(outputStream.toByteArray(), Base64.NO_WRAP)
             }
         } finally {
@@ -164,9 +147,7 @@ object ImageProcessor {
     }
 
     private fun recycleIfSafe(bitmap: Bitmap) {
-        if (!bitmap.isRecycled) {
-            bitmap.recycle()
-        }
+        if (!bitmap.isRecycled) bitmap.recycle()
     }
 
     private const val DEFAULT_PREVIEW_MAX_DIMENSION = 720
