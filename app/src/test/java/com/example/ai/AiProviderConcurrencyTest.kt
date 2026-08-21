@@ -44,6 +44,29 @@ class AiProviderConcurrencyTest {
     }
 
     @Test
+    fun routerPinsProviderBeforeWaitingForAnalysisMutex() = runBlocking {
+        val gemini = BlockingProvider(AiProviderType.GEMINI)
+        val local = RecordingProvider(AiProviderType.LOCAL)
+        val router = AiProviderRouter(
+            listOf(gemini, local),
+            AiProviderType.GEMINI
+        )
+
+        val first = async { router.analyze(bitmap, context, CaptureSettings.DEFAULT) }
+        gemini.firstStarted.await()
+
+        val queued = async { router.analyze(bitmap, context, CaptureSettings.DEFAULT) }
+        router.select(AiProviderType.LOCAL)
+
+        gemini.release()
+        first.await()
+        queued.await()
+
+        assertEquals(2, gemini.completed.get())
+        assertEquals(0, local.invocations.get())
+    }
+
+    @Test
     fun routerCancellationDoesNotWaitForAnalysisMutex() = runBlocking {
         val provider = BlockingProvider()
         val router = AiProviderRouter(listOf(provider))
@@ -59,8 +82,31 @@ class AiProviderConcurrencyTest {
         assertEquals(1, provider.completed.get())
     }
 
-    private class BlockingProvider : AiProvider {
-        override val type = AiProviderType.GEMINI
+    private open class RecordingProvider(
+        override val type: AiProviderType
+    ) : AiProvider {
+        val invocations = AtomicInteger(0)
+
+        override suspend fun analyze(
+            bitmap: Bitmap,
+            context: AnalysisContext,
+            settings: CaptureSettings,
+            userPrompt: String?
+        ): AnalysisResult {
+            invocations.incrementAndGet()
+            return AnalysisResult(
+                contextName = context.name,
+                summary = "ok",
+                observations = emptyList(),
+                conclusion = "ok",
+                isSuccess = true
+            )
+        }
+    }
+
+    private class BlockingProvider(
+        override val type: AiProviderType = AiProviderType.GEMINI
+    ) : RecordingProvider(type) {
         val firstStarted = CompletableDeferred<Unit>()
         val secondStarted = CompletableDeferred<Unit>()
         private val releaseGate = CompletableDeferred<Unit>()
@@ -77,8 +123,8 @@ class AiProviderConcurrencyTest {
             settings: CaptureSettings,
             userPrompt: String?
         ): AnalysisResult {
-            val invocation = ++invocationCount
-            if (invocation == 1) firstStarted.complete(Unit) else secondStarted.complete(Unit)
+            invocationCount += 1
+            if (invocationCount == 1) firstStarted.complete(Unit) else secondStarted.complete(Unit)
             val now = active.incrementAndGet()
             maximumConcurrent.updateAndGet { previous -> maxOf(previous, now) }
             try {
