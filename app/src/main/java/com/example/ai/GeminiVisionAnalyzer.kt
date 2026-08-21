@@ -97,7 +97,22 @@ class GeminiVisionAnalyzer(
             var attempt = 0
             while (attempt <= maxRetries) {
                 val request = Request.Builder().url(getGenerateContentUrl(canonicalModelIdToUse)).addHeader("x-goog-api-key", apiKey).post(requestBody).build()
-                val (statusCode, responseBodyString, isSuccess, retryAfterHeader) = executeCancellationAwareCall(request).use { response -> ResponseSummary(response.code, response.body?.string().orEmpty(), response.isSuccessful, response.header("Retry-After")) }
+                val (statusCode, responseBodyString, isSuccess, retryAfterHeader) = try {
+                    executeCancellationAwareCall(request).use { response -> ResponseSummary(response.code, response.body?.string().orEmpty(), response.isSuccessful, response.header("Retry-After")) }
+                } catch (e: IOException) {
+                    if (attempt < maxRetries) {
+                        val retryDelaySeconds = 2.0.pow(attempt.toDouble()).toLong().coerceIn(2L, 30L)
+                        attempt++
+                        delay(retryDelaySeconds * 1000L)
+                        continue
+                    }
+                    val message = when (e) {
+                        is java.net.UnknownHostException -> "No internet connection. Please verify your network."
+                        is java.net.SocketTimeoutException -> "Request timed out while waiting for Gemini response."
+                        else -> "Network communication error: ${e.localizedMessage ?: "Please try again."}"
+                    }
+                    return@withContext AnalysisResult(contextName=context.name, summary="Failed to complete AI screen analysis", observations=listOf(message), conclusion="Please verify network connectivity and try again.", rawResponse="", isSuccess=false, errorMessage=message, processingDurationMs=System.currentTimeMillis()-startTime)
+                }
                 if (isSuccess) {
                     _rateLimitState.value = RateLimitState.NORMAL
                     val rawText = parseGeminiResponseContent(responseBodyString)
