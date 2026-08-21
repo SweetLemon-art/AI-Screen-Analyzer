@@ -23,33 +23,21 @@ class LiteRtLmRuntime(context: Context) : LocalModelRuntime {
     private val appContext = context.applicationContext
     private val lock = Any()
 
-    @Volatile
-    private var engine: Engine? = null
-
-    @Volatile
-    private var conversation: Conversation? = null
-
-    @Volatile
-    private var loadedModel: LocalModel? = null
-
-    @Volatile
-    private var generationCompletion: CompletableDeferred<Unit>? = null
+    @Volatile private var engine: Engine? = null
+    @Volatile private var conversation: Conversation? = null
+    @Volatile private var loadedModel: LocalModel? = null
+    @Volatile private var generationCompletion: CompletableDeferred<Unit>? = null
 
     override suspend fun load(model: LocalModel): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching {
             synchronized(lock) {
-                if (conversation != null) {
-                    throw IllegalStateException("Cannot load a model while local AI generation is running")
-                }
+                if (conversation != null) throw IllegalStateException("Cannot load a model while local AI generation is running")
                 if (loadedModel?.id == model.id && engine?.isInitialized() == true) return@runCatching
-
                 closeLocked()
-
                 val modelFile = File(appContext.filesDir, "local_models/${model.id}/${model.fileName}")
                 require(modelFile.isFile) { "Model file not found: ${model.fileName}" }
                 LocalModelValidator.validateFileName(model.fileName)
                 LocalModelValidator.validateConfiguration(model.configuration)
-
                 val config = buildEngineConfig(model, modelFile, appContext)
                 val newEngine = Engine(config)
                 try {
@@ -58,11 +46,6 @@ class LiteRtLmRuntime(context: Context) : LocalModelRuntime {
                     runCatching { newEngine.close() }
                     throw error
                 }
-
-                // A declared image capability is only accepted after LiteRT-LM successfully
-                // initializes the vision executor with image input enabled. The public Android
-                // API does not expose model capability metadata directly, so this is the
-                // strongest provider-side validation available without executing an inference.
                 if (model.capabilities.image) {
                     try {
                         newEngine.createConversation(ConversationConfig()).close()
@@ -74,7 +57,6 @@ class LiteRtLmRuntime(context: Context) : LocalModelRuntime {
                         )
                     }
                 }
-
                 engine = newEngine
                 loadedModel = model
             }
@@ -82,39 +64,22 @@ class LiteRtLmRuntime(context: Context) : LocalModelRuntime {
     }
 
     override fun generate(prompt: String): Flow<LocalAiEvent> = generateInternal(prompt, null)
-
-    override fun generate(prompt: String, imageBytes: ByteArray): Flow<LocalAiEvent> =
-        generateInternal(prompt, imageBytes)
+    override fun generate(prompt: String, imageBytes: ByteArray): Flow<LocalAiEvent> = generateInternal(prompt, imageBytes)
 
     private fun generateInternal(prompt: String, imageBytes: ByteArray?): Flow<LocalAiEvent> = flow {
         require(prompt.isNotBlank()) { "Prompt must not be blank" }
-        if (imageBytes != null) {
-            require(imageBytes.isNotEmpty()) { "Image bytes must not be empty" }
-        }
-
+        if (imageBytes != null) require(imageBytes.isNotEmpty()) { "Image bytes must not be empty" }
         var setupError: Throwable? = null
         var activeConversation: Conversation? = null
         val completion = CompletableDeferred<Unit>()
-
         synchronized(lock) {
             val currentEngine = engine
             val currentModel = loadedModel
-
             when {
-                currentEngine == null || currentModel == null -> {
-                    setupError = IllegalStateException("No local model is loaded")
-                }
-                !currentEngine.isInitialized() -> {
-                    setupError = IllegalStateException("Local model engine is not initialized")
-                }
-                imageBytes != null && !currentModel.capabilities.image -> {
-                    setupError = IllegalArgumentException(
-                        "The selected local model does not declare image capability"
-                    )
-                }
-                conversation != null -> {
-                    setupError = IllegalStateException("A local AI generation is already running")
-                }
+                currentEngine == null || currentModel == null -> setupError = IllegalStateException("No local model is loaded")
+                !currentEngine.isInitialized() -> setupError = IllegalStateException("Local model engine is not initialized")
+                imageBytes != null && !currentModel.capabilities.image -> setupError = IllegalArgumentException("The selected local model does not declare image capability")
+                conversation != null -> setupError = IllegalStateException("A local AI generation is already running")
                 else -> {
                     val conversationConfig = ConversationConfig(
                         samplerConfig = SamplerConfig(
@@ -130,32 +95,20 @@ class LiteRtLmRuntime(context: Context) : LocalModelRuntime {
                 }
             }
         }
-
         setupError?.let {
             completion.complete(Unit)
             emit(LocalAiEvent.Failed(it))
             return@flow
         }
-
         val runningConversation = requireNotNull(activeConversation)
-
         emit(LocalAiEvent.Started)
-
         try {
             val responseFlow = if (imageBytes == null) {
                 runningConversation.sendMessageAsync(prompt)
             } else {
-                runningConversation.sendMessageAsync(
-                    Contents.of(
-                        Content.Text(prompt),
-                        Content.ImageBytes(imageBytes)
-                    )
-                )
+                runningConversation.sendMessageAsync(Contents.of(Content.Text(prompt), Content.ImageBytes(imageBytes)))
             }
-
-            responseFlow.collect { message ->
-                emit(LocalAiEvent.Token(message.toString()))
-            }
+            responseFlow.collect { message -> emit(LocalAiEvent.Token(message.toString())) }
             emit(LocalAiEvent.Completed)
         } catch (error: CancellationException) {
             throw error
@@ -171,34 +124,23 @@ class LiteRtLmRuntime(context: Context) : LocalModelRuntime {
         }
     }
 
-    override suspend fun cancel(): Unit {
-        withContext(Dispatchers.IO) {
-            val activeConversation = synchronized(lock) {
-                conversation
-            } ?: return@withContext
-
-            runCatching { activeConversation.cancelProcess() }
-        }
+    override suspend fun cancel(): Unit = withContext(Dispatchers.IO) {
+        val activeConversation = synchronized(lock) { conversation } ?: return@withContext
+        runCatching { activeConversation.cancelProcess() }
     }
 
-    override suspend fun unload(): Unit {
-        withContext(Dispatchers.IO) {
-            val activeConversation: Conversation?
-            val completion: CompletableDeferred<Unit>?
-            synchronized(lock) {
-                activeConversation = conversation
-                completion = generationCompletion
-            }
-
-            if (activeConversation != null) {
-                runCatching { activeConversation.cancelProcess() }
-                completion?.await()
-            }
-
-            synchronized(lock) {
-                closeLocked()
-            }
+    override suspend fun unload(): Unit = withContext(Dispatchers.IO) {
+        val activeConversation: Conversation?
+        val completion: CompletableDeferred<Unit>?
+        synchronized(lock) {
+            activeConversation = conversation
+            completion = generationCompletion
         }
+        if (activeConversation != null) {
+            runCatching { activeConversation.cancelProcess() }
+            completion?.await()
+        }
+        synchronized(lock) { closeLocked() }
     }
 
     private fun closeLocked() {
@@ -217,13 +159,29 @@ class LiteRtLmRuntime(context: Context) : LocalModelRuntime {
                 Accelerator.GPU -> Backend.GPU()
                 Accelerator.NPU -> Backend.NPU(context.applicationInfo.nativeLibraryDir)
             }
+            val vision = imageRuntimeConfiguration(model.capabilities)
             return EngineConfig(
                 modelPath = modelFile.absolutePath,
                 backend = backend,
-                visionBackend = if (model.capabilities.image) backend else null,
-                maxNumImages = if (model.capabilities.image) 1 else null,
+                visionBackend = vision.backend ?: null,
+                maxNumImages = vision.maxNumImages,
                 cacheDir = context.cacheDir.absolutePath
             )
         }
+
+        internal fun imageRuntimeConfiguration(capabilities: ModelCapabilities): ImageRuntimeConfiguration =
+            if (capabilities.image) {
+                ImageRuntimeConfiguration(visionEnabled = true, maxNumImages = 1)
+            } else {
+                ImageRuntimeConfiguration(visionEnabled = false, maxNumImages = null)
+            }
     }
+}
+
+data class ImageRuntimeConfiguration(
+    val visionEnabled: Boolean,
+    val maxNumImages: Int?
+) {
+    val backend: Backend?
+        get() = null
 }
