@@ -3,13 +3,13 @@ package com.example.localai
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.toList
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertThrows
 import org.junit.Test
 
 class LocalAiFatalErrorRegressionTest {
     @Test
-    fun runtimeError_propagates_instead_of_becoming_failed_event() = runBlocking {
+    fun runtimeError_propagates_instead_of_becoming_failed_event() = runTest {
         val model = LocalModel(
             id = "model-1",
             fileName = "model.litertlm",
