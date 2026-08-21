@@ -2,6 +2,7 @@ package com.example.localai
 
 import android.content.Context
 import com.google.ai.edge.litertlm.Backend
+import com.google.ai.edge.litertlm.Conversation
 import com.google.ai.edge.litertlm.ConversationConfig
 import com.google.ai.edge.litertlm.Engine
 import com.google.ai.edge.litertlm.EngineConfig
@@ -22,7 +23,7 @@ class LiteRtLmRuntime(context: Context) : LocalModelRuntime {
     private var engine: Engine? = null
 
     @Volatile
-    private var conversation: com.google.ai.edge.litertlm.Conversation? = null
+    private var conversation: Conversation? = null
 
     @Volatile
     private var loadedModel: LocalModel? = null
@@ -30,6 +31,9 @@ class LiteRtLmRuntime(context: Context) : LocalModelRuntime {
     override suspend fun load(model: LocalModel): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching {
             synchronized(lock) {
+                if (conversation != null) {
+                    throw IllegalStateException("Cannot load a model while local AI generation is running")
+                }
                 if (loadedModel?.id == model.id && engine?.isInitialized() == true) return@runCatching
 
                 closeLocked()
@@ -66,40 +70,54 @@ class LiteRtLmRuntime(context: Context) : LocalModelRuntime {
     override fun generate(prompt: String): Flow<LocalAiEvent> = flow {
         require(prompt.isNotBlank()) { "Prompt must not be blank" }
 
-        val activeEngine: Engine
-        val model: LocalModel
-        val activeConversation: com.google.ai.edge.litertlm.Conversation
+        var setupError: Throwable? = null
+        var activeConversation: Conversation? = null
 
+        // Protect only the short-lived state transition. Never call emit() while
+        // holding this monitor because emit is a suspension point.
         synchronized(lock) {
-            activeEngine = engine ?: run {
-                emit(LocalAiEvent.Failed(IllegalStateException("No local model is loaded")))
-                return@flow
-            }
-            model = loadedModel ?: run {
-                emit(LocalAiEvent.Failed(IllegalStateException("No local model is loaded")))
-                return@flow
-            }
-            check(activeEngine.isInitialized()) { "Local model engine is not initialized" }
-            check(conversation == null) { "A local AI generation is already running" }
+            val currentEngine = engine
+            val currentModel = loadedModel
 
-            val conversationConfig = ConversationConfig(
-                samplerConfig = SamplerConfig(
-                    topK = model.configuration.topK,
-                    topP = model.configuration.topP,
-                    temperature = model.configuration.temperature
-                )
-            )
-            activeConversation = activeEngine.createConversation(conversationConfig)
-            conversation = activeConversation
+            when {
+                currentEngine == null || currentModel == null -> {
+                    setupError = IllegalStateException("No local model is loaded")
+                }
+                !currentEngine.isInitialized() -> {
+                    setupError = IllegalStateException("Local model engine is not initialized")
+                }
+                conversation != null -> {
+                    setupError = IllegalStateException("A local AI generation is already running")
+                }
+                else -> {
+                    val conversationConfig = ConversationConfig(
+                        samplerConfig = SamplerConfig(
+                            topK = currentModel.configuration.topK,
+                            topP = currentModel.configuration.topP,
+                            temperature = currentModel.configuration.temperature
+                        ),
+                        maxOutputToken = currentModel.configuration.maxTokens
+                    )
+                    val createdConversation = currentEngine.createConversation(conversationConfig)
+                    activeConversation = createdConversation
+                    conversation = createdConversation
+                }
+            }
         }
+
+        setupError?.let {
+            emit(LocalAiEvent.Failed(it))
+            return@flow
+        }
+
+        val runningConversation = requireNotNull(activeConversation)
 
         emit(LocalAiEvent.Started)
 
         try {
-            activeConversation.sendMessageAsync(
-                prompt,
-                maxOutputToken = model.configuration.maxTokens
-            ).collect { message ->
+            // LiteRT-LM provides a coroutine-friendly Flow overload when no callback
+            // argument is supplied. Sampling and max output tokens are configured above.
+            runningConversation.sendMessageAsync(prompt).collect { message ->
                 emit(LocalAiEvent.Token(message.toString()))
             }
             emit(LocalAiEvent.Completed)
@@ -107,22 +125,28 @@ class LiteRtLmRuntime(context: Context) : LocalModelRuntime {
             emit(LocalAiEvent.Failed(error))
         } finally {
             synchronized(lock) {
-                if (conversation === activeConversation) conversation = null
+                if (conversation === runningConversation) conversation = null
             }
-            runCatching { activeConversation.close() }
+            runCatching { runningConversation.close() }
         }
     }
 
     override suspend fun cancel() = withContext(Dispatchers.IO) {
-        synchronized(lock) {
-            val activeConversation = conversation ?: return@synchronized
-            runCatching { activeConversation.cancelProcess() }
-            runCatching { activeConversation.close() }
-            conversation = null
-        }
+        val activeConversation = synchronized(lock) {
+            conversation
+        } ?: return@withContext
+
+        // The generate() flow owns the conversation lifetime. Cancel the native
+        // operation here and let generate() close the conversation in finally.
+        runCatching { activeConversation.cancelProcess() }
     }
 
     override suspend fun unload() = withContext(Dispatchers.IO) {
+        val activeConversation = synchronized(lock) { conversation }
+        if (activeConversation != null) {
+            runCatching { activeConversation.cancelProcess() }
+        }
+
         synchronized(lock) {
             closeLocked()
         }
