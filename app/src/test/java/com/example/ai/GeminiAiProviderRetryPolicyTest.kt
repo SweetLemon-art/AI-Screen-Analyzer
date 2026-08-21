@@ -3,12 +3,13 @@ package com.example.ai
 import android.graphics.Bitmap
 import com.example.data.AnalysisContext
 import com.example.data.CaptureSettings
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.asStateFlow
 
 class GeminiAiProviderRetryPolicyTest {
     private val bitmap = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888)
