@@ -18,6 +18,21 @@ import org.robolectric.annotation.GraphicsMode
 class ImageProcessorMemoryTest {
 
     @Test
+    fun createPreviewBitmap_creates_independent_copy_when_already_small() {
+        val source = Bitmap.createBitmap(640, 360, Bitmap.Config.ARGB_8888)
+
+        val preview = ImageProcessor.createPreviewBitmap(source, maxDimension = 720)
+
+        assertNotNull(preview)
+        assertNotSame(source, preview)
+        assertFalse(source.isRecycled)
+        assertFalse(preview.isRecycled)
+
+        preview.recycle()
+        source.recycle()
+    }
+
+    @Test
     fun createPreviewBitmap_downscales_large_source_without_recycling_source() {
         val source = Bitmap.createBitmap(1600, 900, Bitmap.Config.ARGB_8888)
 
@@ -31,18 +46,6 @@ class ImageProcessorMemoryTest {
         assertFalse(preview.isRecycled)
 
         preview.recycle()
-        source.recycle()
-    }
-
-    @Test
-    fun createPreviewBitmap_does_not_allocate_duplicate_when_already_small() {
-        val source = Bitmap.createBitmap(640, 360, Bitmap.Config.ARGB_8888)
-
-        val preview = ImageProcessor.createPreviewBitmap(source, maxDimension = 720)
-
-        assertTrue(source === preview)
-        assertFalse(source.isRecycled)
-
         source.recycle()
     }
 
