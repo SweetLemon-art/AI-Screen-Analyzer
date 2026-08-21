@@ -9,6 +9,7 @@ import com.example.localai.LocalAiEvent
 import com.example.localai.LocalAiProvider
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -47,7 +48,8 @@ enum class AiProviderType {
 
 /** Adapts the existing Gemini VisionAnalyzer to the unified provider contract. */
 class GeminiAiProvider(
-    private val delegate: VisionAnalyzer
+    private val delegate: VisionAnalyzer,
+    private val transientServerRetryCount: Int = DEFAULT_TRANSIENT_SERVER_RETRY_COUNT
 ) : AiProvider {
     override val type: AiProviderType = AiProviderType.GEMINI
 
@@ -58,7 +60,22 @@ class GeminiAiProvider(
         userPrompt: String?
     ): AnalysisResult {
         val effectiveContext = context.withUserPrompt(userPrompt)
-        return delegate.analyze(bitmap, effectiveContext, settings)
+        var attempt = 0
+        while (true) {
+            val result = delegate.analyze(bitmap, effectiveContext, settings)
+            if (!result.isTransientServerFailure() || attempt >= transientServerRetryCount) {
+                return result
+            }
+
+            attempt++
+            delay((TRANSIENT_SERVER_BASE_DELAY_MS * (1L shl (attempt - 1))).coerceAtMost(TRANSIENT_SERVER_MAX_DELAY_MS))
+        }
+    }
+
+    private companion object {
+        const val DEFAULT_TRANSIENT_SERVER_RETRY_COUNT = 2
+        const val TRANSIENT_SERVER_BASE_DELAY_MS = 1_000L
+        const val TRANSIENT_SERVER_MAX_DELAY_MS = 4_000L
     }
 }
 
@@ -254,6 +271,12 @@ class AiProviderRouter(
         // to release an analysis currently holding that mutex.
         providersByType.getValue(type).cancel()
     }
+}
+
+private fun AnalysisResult.isTransientServerFailure(): Boolean {
+    if (isSuccess) return false
+    return summary.matches(Regex("Analysis request failed \\(5\\d{2}\\)")) ||
+        errorMessage?.contains("Gemini service temporarily unavailable.") == true
 }
 
 private fun AnalysisContext.withUserPrompt(userPrompt: String?): AnalysisContext {
