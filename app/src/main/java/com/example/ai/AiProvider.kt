@@ -16,6 +16,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Application-facing AI provider contract.
@@ -114,16 +115,12 @@ class LocalAiScreenProvider(
                 )
             }
             if (!completed) {
-                // Timeout cancels the coroutine, but the native LiteRT-LM operation
-                // also needs an explicit cancellation signal before returning.
                 withContext(NonCancellable) { delegate.cancel() }
                 return failure(context, startTime, "Local AI generation timed out")
             }
 
             parseResponse(context, startTime, rawResponse)
         } catch (error: CancellationException) {
-            // Explicit UI cancellation and lifecycle cancellation must stop the
-            // native LiteRT-LM process as well as the Kotlin coroutine.
             withContext(NonCancellable) { delegate.cancel() }
             throw error
         } catch (error: Exception) {
@@ -210,7 +207,7 @@ class AiProviderRouter(
 ) {
     private val providersByType = providers.associateBy { it.type }
     private val analysisMutex = Mutex()
-    private var selected: AiProviderType = initialProvider
+    private val selected = AtomicReference(initialProvider)
 
     init {
         require(providersByType.isNotEmpty()) { "At least one AI provider is required" }
@@ -223,22 +220,34 @@ class AiProviderRouter(
         if (!providersByType.containsKey(type)) {
             return Result.failure(IllegalArgumentException("AI provider is not registered: $type"))
         }
-        selected = type
+        selected.set(type)
         return Result.success(Unit)
     }
 
-    fun selectedType(): AiProviderType = selected
+    fun selectedType(): AiProviderType = selected.get()
 
     suspend fun analyze(
         bitmap: Bitmap,
         context: AnalysisContext,
         settings: CaptureSettings = CaptureSettings.DEFAULT,
         userPrompt: String? = null
-    ): AnalysisResult = analysisMutex.withLock {
-        providersByType.getValue(selected).analyze(bitmap, context, settings, userPrompt)
+    ): AnalysisResult {
+        // Snapshot the provider before waiting for the analysis mutex. A provider
+        // selection change must affect only requests created after the change.
+        return analyze(selected.get(), bitmap, context, settings, userPrompt)
     }
 
-    suspend fun cancel() = cancel(selected)
+    suspend fun analyze(
+        providerType: AiProviderType,
+        bitmap: Bitmap,
+        context: AnalysisContext,
+        settings: CaptureSettings = CaptureSettings.DEFAULT,
+        userPrompt: String? = null
+    ): AnalysisResult = analysisMutex.withLock {
+        providersByType.getValue(providerType).analyze(bitmap, context, settings, userPrompt)
+    }
+
+    suspend fun cancel() = cancel(selected.get())
 
     suspend fun cancel(type: AiProviderType) {
         // Cancellation must not wait for analysisMutex: it is the mechanism used
