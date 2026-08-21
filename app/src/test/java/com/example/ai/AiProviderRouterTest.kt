@@ -75,11 +75,22 @@ class AiProviderRouterTest {
         assertEquals("What error is visible?", provider.lastPrompt)
     }
 
+    @Test
+    fun cancelDelegatesToSelectedProvider() = runBlocking {
+        val provider = FakeProvider(AiProviderType.LOCAL)
+        val router = AiProviderRouter(listOf(provider), initialProvider = AiProviderType.LOCAL)
+
+        router.cancel()
+
+        assertEquals(1, provider.cancelCount)
+    }
+
     private class FakeProvider(
         override val type: AiProviderType,
         private val response: String = type.name
     ) : AiProvider {
         var lastPrompt: String? = null
+        var cancelCount = 0
 
         override suspend fun analyze(
             bitmap: Bitmap,
@@ -92,6 +103,10 @@ class AiProviderRouterTest {
                 contextName = context.name,
                 summary = response
             )
+        }
+
+        override suspend fun cancel() {
+            cancelCount += 1
         }
     }
 }
