@@ -266,7 +266,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             controller.startMonitoring(
                 contextProvider = { _currentContext.value },
                 settingsProvider = { _settings.value },
-                providerProvider = { _selectedAiProvider.value }
+                providerProvider = { providerType }
             )
             _currentRoute.value = ScreenRoute.MONITOR
         }
