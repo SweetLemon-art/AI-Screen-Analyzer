@@ -45,20 +45,20 @@ import com.example.localai.Accelerator
 import com.example.localai.LocalModel
 import com.example.localai.LocalModelConfiguration
 import com.example.localai.LocalModelImportPlan
-import com.example.localai.LocalModelRepository
 import com.example.localai.ModelCapabilities
 import com.example.localai.ModelType
 import kotlinx.coroutines.launch
 
 @Composable
-fun LocalModelsScreen() {
+fun LocalModelsScreen(viewModel: MainViewModel) {
     val context = LocalContext.current
-    val repository = remember { LocalModelRepository(context) }
+    val repository = viewModel.localModelRepositoryForUi()
     val scope = androidx.compose.runtime.rememberCoroutineScope()
     var models by remember { mutableStateOf(emptyList<LocalModel>()) }
     var selectedUri by remember { mutableStateOf<android.net.Uri?>(null) }
     var selectedName by remember { mutableStateOf("") }
     var importing by remember { mutableStateOf(false) }
+    var deletingModelId by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
 
     fun reload() { scope.launch { models = repository.listModels() } }
@@ -101,12 +101,20 @@ fun LocalModelsScreen() {
                                 Text("${model.modelType.name} • ${model.accelerator.name}")
                                 Text("${model.configuration.maxTokens} tokens • Top K ${model.configuration.topK}")
                             }
-                            IconButton(onClick = {
-                                scope.launch {
-                                    repository.deleteModel(model.id).onFailure { error = it.message }
-                                    reload()
+                            IconButton(
+                                enabled = deletingModelId == null,
+                                onClick = {
+                                    deletingModelId = model.id
+                                    scope.launch {
+                                        viewModel.deleteLocalModel(model.id)
+                                            .onFailure { error = it.message ?: "Unable to delete model" }
+                                        reload()
+                                        deletingModelId = null
+                                    }
                                 }
-                            }) { Icon(Icons.Default.Delete, contentDescription = "Delete") }
+                            ) {
+                                if (deletingModelId == model.id) CircularProgressIndicator() else Icon(Icons.Default.Delete, contentDescription = "Delete")
+                            }
                         }
                     }
                 }
