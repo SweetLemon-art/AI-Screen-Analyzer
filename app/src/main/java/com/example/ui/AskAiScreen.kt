@@ -4,7 +4,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -28,21 +27,17 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.unit.dp
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.unit.dp
 import com.example.ai.AiProviderType
 import com.example.ui.components.AnalysisResultCard
 import com.example.ui.components.ScreenPreviewCard
-import com.example.ui.theme.NeonCyan
 import com.example.ui.theme.Slate700
 import com.example.ui.theme.Slate900
 import com.example.ui.theme.Slate950
 
 @Composable
-fun AskAiScreen(
-    viewModel: MainViewModel,
-    modifier: Modifier = Modifier
-) {
+fun AskAiScreen(viewModel: MainViewModel, modifier: Modifier = Modifier) {
     val latestBitmap by viewModel.latestBitmap.collectAsState()
     val latestCaptureTimestamp by viewModel.lastCaptureTimestamp.collectAsState()
     val selectedProvider by viewModel.selectedAiProvider.collectAsState()
@@ -59,10 +54,7 @@ fun AskAiScreen(
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         Text("Ask AI", style = MaterialTheme.typography.headlineMedium, color = Color.White)
-        Text(
-            "Ask a question about the latest captured screen.",
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
+        Text("Ask a question about the latest captured screen", color = MaterialTheme.colorScheme.onSurfaceVariant)
 
         Card(
             modifier = Modifier.fillMaxWidth(),
@@ -101,15 +93,21 @@ fun AskAiScreen(
             shape = RoundedCornerShape(14.dp)
         )
 
-        Button(
-            onClick = { viewModel.askAi(prompt) },
-            enabled = !isAsking && prompt.isNotBlank() && latestBitmap != null,
-            modifier = Modifier.fillMaxWidth().height(54.dp).testTag("ask_ai_button"),
-            shape = RoundedCornerShape(14.dp)
-        ) {
-            if (isAsking) {
-                CircularProgressIndicator(strokeWidth = 2.dp)
-            } else {
+        if (isAsking) {
+            Button(
+                onClick = viewModel::cancelAskAi,
+                modifier = Modifier.fillMaxWidth().height(54.dp).testTag("ask_ai_cancel_button"),
+                shape = RoundedCornerShape(14.dp)
+            ) {
+                Text("CANCEL")
+            }
+        } else {
+            Button(
+                onClick = { viewModel.askAi(prompt) },
+                enabled = prompt.isNotBlank() && latestBitmap != null,
+                modifier = Modifier.fillMaxWidth().height(54.dp).testTag("ask_ai_button"),
+                shape = RoundedCornerShape(14.dp)
+            ) {
                 Text("ASK ${if (selectedProvider == AiProviderType.GEMINI) "GEMINI" else "LOCAL AI"}")
             }
         }
