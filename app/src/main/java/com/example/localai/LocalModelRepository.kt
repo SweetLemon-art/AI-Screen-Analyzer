@@ -4,10 +4,10 @@ import android.content.Context
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
-class LocalModelRepository(context: Context) {
+class LocalModelRepository(context: Context) : LocalModelCatalog {
     private val store = LocalModelStore(context.applicationContext)
 
-    suspend fun listModels(): List<LocalModel> = withContext(Dispatchers.IO) { store.list() }
+    override suspend fun listModels(): List<LocalModel> = withContext(Dispatchers.IO) { store.list() }
 
     suspend fun importModel(plan: LocalModelImportPlan): Result<LocalModel> = withContext(Dispatchers.IO) {
         runCatching {
