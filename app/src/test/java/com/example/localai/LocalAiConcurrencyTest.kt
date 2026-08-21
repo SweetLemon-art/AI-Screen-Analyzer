@@ -65,10 +65,11 @@ class LocalAiConcurrencyTest {
 
     @Test
     fun modelSelectionCancelsActiveGenerationBeforeSwitching() = runBlocking {
-        val runtime = BlockingRuntime()
+        val runtime = BlockingRuntime(failModelId = null)
         val provider = LocalAiProvider(FakeCatalog(firstModel, secondModel), runtime)
         provider.selectModel(firstModel.id)
         runtime.loadCalls.set(0)
+        runtime.cancelled = false
 
         val generation = async { provider.generate("first", byteArrayOf(1)).collect {} }
         runtime.firstStarted.await()
@@ -113,7 +114,7 @@ class LocalAiConcurrencyTest {
         private val releaseGate = CompletableDeferred<Unit>()
         private var generationCount = 0
         var cancelled = false
-            private set
+            set
 
         override suspend fun load(model: LocalModel): Result<Unit> {
             loadCalls.incrementAndGet()
@@ -145,8 +146,12 @@ class LocalAiConcurrencyTest {
         override suspend fun unload() = Unit
 
         override suspend fun cancel() {
-            cancelled = true
-            releaseGate.complete(Unit)
+            // selectModel() calls cancel() before the first generation starts.
+            // Only an active generation should be released by cancellation.
+            if (active.get() > 0) {
+                cancelled = true
+                releaseGate.complete(Unit)
+            }
         }
 
         fun release() {
