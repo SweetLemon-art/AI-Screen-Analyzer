@@ -159,29 +159,13 @@ class LiteRtLmRuntime(context: Context) : LocalModelRuntime {
                 Accelerator.GPU -> Backend.GPU()
                 Accelerator.NPU -> Backend.NPU(context.applicationInfo.nativeLibraryDir)
             }
-            val vision = imageRuntimeConfiguration(model.capabilities)
             return EngineConfig(
                 modelPath = modelFile.absolutePath,
                 backend = backend,
-                visionBackend = vision.backend ?: null,
-                maxNumImages = vision.maxNumImages,
+                visionBackend = if (model.capabilities.image) backend else null,
+                maxNumImages = if (model.capabilities.image) 1 else null,
                 cacheDir = context.cacheDir.absolutePath
             )
         }
-
-        internal fun imageRuntimeConfiguration(capabilities: ModelCapabilities): ImageRuntimeConfiguration =
-            if (capabilities.image) {
-                ImageRuntimeConfiguration(visionEnabled = true, maxNumImages = 1)
-            } else {
-                ImageRuntimeConfiguration(visionEnabled = false, maxNumImages = null)
-            }
     }
-}
-
-data class ImageRuntimeConfiguration(
-    val visionEnabled: Boolean,
-    val maxNumImages: Int?
-) {
-    val backend: Backend?
-        get() = null
 }
