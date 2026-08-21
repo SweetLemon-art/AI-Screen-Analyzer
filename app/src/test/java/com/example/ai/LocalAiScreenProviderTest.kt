@@ -37,6 +37,9 @@ class LocalAiScreenProviderTest {
             runtime = runtime
         )
         check(delegate.selectModel(model.id).isSuccess)
+        // selectModel() intentionally calls cancel() to establish a clean runtime boundary.
+        // Reset the test observation so this test measures cancellation caused by analyze().
+        runtime.cancelCount = 0
 
         val provider = LocalAiScreenProvider(delegate, generationTimeoutMs = 5_000L)
         val bitmap = Bitmap.createBitmap(32, 32, Bitmap.Config.ARGB_8888)
@@ -63,6 +66,8 @@ class LocalAiScreenProviderTest {
             runtime = runtime
         )
         check(delegate.selectModel(model.id).isSuccess)
+        // See the cancellation test above: isolate the analysis-time cancellation signal.
+        runtime.cancelCount = 0
 
         val provider = LocalAiScreenProvider(delegate, generationTimeoutMs = 1L)
         val bitmap = Bitmap.createBitmap(32, 32, Bitmap.Config.ARGB_8888)
