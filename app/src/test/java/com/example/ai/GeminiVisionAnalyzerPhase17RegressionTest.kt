@@ -98,7 +98,7 @@ class GeminiVisionAnalyzerPhase17RegressionTest {
             CaptureSettings.DEFAULT
         )
 
-        assertTrue(result.isFailure)
+        assertTrue(!result.isSuccess)
         assertEquals(1, calls.get())
     }
 }
