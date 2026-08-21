@@ -11,6 +11,9 @@ interface LocalModelRuntime {
 
     fun generate(prompt: String): Flow<LocalAiEvent>
 
+    /** Generates a multimodal response from text plus an encoded image. */
+    fun generate(prompt: String, imageBytes: ByteArray): Flow<LocalAiEvent>
+
     suspend fun unload()
 
     suspend fun cancel()
