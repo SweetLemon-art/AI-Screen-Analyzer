@@ -25,26 +25,15 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.atomic.AtomicLong
 
-/** Commands handled sequentially by the single lifecycle coordinator. */
 private sealed interface LifecycleCommand {
     data class Start(
         val contextProvider: () -> AnalysisContext,
         val settingsProvider: () -> CaptureSettings
     ) : LifecycleCommand
-
     data object Stop : LifecycleCommand
-
     data object Reset : LifecycleCommand
 }
 
-/**
- * Single lifecycle coordinator managing start/stop serialization and monitoring execution.
- *
- * Architecture:
- * UI/API -> single lifecycle command stream -> sequential execution -> exactly ONE active monitoring Job.
- * The command stream is conflated so a burst of UI commands cannot build an unbounded backlog;
- * the latest requested lifecycle state wins.
- */
 class MonitoringController(
     private val visionAnalyzer: VisionAnalyzer,
     private val coroutineScope: CoroutineScope,
@@ -52,23 +41,12 @@ class MonitoringController(
 ) {
     private val _state = MutableStateFlow<MonitoringState>(MonitoringState.Idle)
     val state: StateFlow<MonitoringState> = _state.asStateFlow()
-
-    /**
-     * UI-owned preview snapshot.
-     *
-     * Replacing the StateFlow intentionally drops the controller's reference to the previous
-     * preview. The previous bitmap must not be manually recycled because Compose/RenderThread
-     * may still be using it. Once the UI releases it, normal Bitmap/GC lifecycle can reclaim it.
-     */
     private val _latestBitmap = MutableStateFlow<Bitmap?>(null)
     val latestBitmap: StateFlow<Bitmap?> = _latestBitmap.asStateFlow()
-
     private val _latestResult = MutableStateFlow<AnalysisResult?>(null)
     val latestResult: StateFlow<AnalysisResult?> = _latestResult.asStateFlow()
-
     private val _analysisCount = MutableStateFlow(0)
     val analysisCount: StateFlow<Int> = _analysisCount.asStateFlow()
-
     private val _lastCaptureTimestamp = MutableStateFlow<Long?>(null)
     val lastCaptureTimestamp: StateFlow<Long?> = _lastCaptureTimestamp.asStateFlow()
 
@@ -88,13 +66,8 @@ class MonitoringController(
 
     init {
         if (captureProvider is ScreenCaptureLifecycleProvider) {
-            captureProvider.setOnSessionStoppedListener {
-                // MediaProjection termination is an authoritative external STOP event.
-                // Route it through the same serialized lifecycle coordinator as UI STOP.
-                stopMonitoring()
-            }
+            captureProvider.setOnSessionStoppedListener { stopMonitoring() }
         }
-
         coroutineScope.launch {
             for (command in commandChannel) {
                 try {
@@ -114,27 +87,16 @@ class MonitoringController(
         when (command) {
             is LifecycleCommand.Start -> {
                 val newSessionId = sessionCounter.incrementAndGet()
-
                 activeJob?.cancel()
-                try {
-                    activeJob?.join()
-                } catch (_: CancellationException) {
-                    // The coordinator itself remains alive; the monitoring job was intentionally cancelled.
-                }
+                try { activeJob?.join() } catch (_: CancellationException) { }
                 activeJob = null
-
                 if (newSessionId != sessionCounter.get()) return
-
                 _state.value = MonitoringState.Starting
                 activeJob = coroutineScope.launch {
                     runMonitoringLoop(newSessionId, command.contextProvider, command.settingsProvider)
                 }
             }
-
-            is LifecycleCommand.Stop -> {
-                stopActiveMonitoring()
-            }
-
+            is LifecycleCommand.Stop -> stopActiveMonitoring()
             is LifecycleCommand.Reset -> {
                 stopActiveMonitoring()
                 _latestBitmap.value = null
@@ -148,13 +110,8 @@ class MonitoringController(
     private suspend fun stopActiveMonitoring() {
         sessionCounter.incrementAndGet()
         _state.value = MonitoringState.Stopping
-
         activeJob?.cancel()
-        try {
-            activeJob?.join()
-        } catch (_: CancellationException) {
-            // Cancellation of the monitoring child is expected during STOP.
-        }
+        try { activeJob?.join() } catch (_: CancellationException) { }
         activeJob = null
         _state.value = MonitoringState.Idle
     }
@@ -177,19 +134,6 @@ class MonitoringController(
         }
     }
 
-    /**
-     * Sequential execution of Capture -> AI -> Delay.
-     *
-     * Bitmap ownership rule:
-     * - captureProvider transfers ownership of a successful capture bitmap here.
-     * - A separate downscaled preview is retained for the UI when possible.
-     * - The full-resolution analysis bitmap is recycled after AI processing finishes,
-     *   including cancellation/error paths, when it is not the bitmap currently exposed to UI.
-     * - A failed preview conversion never exposes the full-resolution analysis bitmap to the UI.
-     * - If preview generation returns the source bitmap, that bitmap remains UI-owned.
-     * - Replaced UI preview bitmaps are not manually recycled because Compose/RenderThread may
-     *   still be using the previous snapshot; replacing StateFlow drops this controller reference.
-     */
     private suspend fun runMonitoringLoop(
         sessionId: Long,
         contextProvider: () -> AnalysisContext,
@@ -201,7 +145,6 @@ class MonitoringController(
                     ready || sessionId != sessionCounter.get() || !currentCoroutineContext().isActive
                 }
             } == true
-
             if (!becameReady || sessionId != sessionCounter.get() || !currentCoroutineContext().isActive) {
                 if (sessionId == sessionCounter.get() && currentCoroutineContext().isActive) {
                     _state.value = MonitoringState.Error(
@@ -214,14 +157,11 @@ class MonitoringController(
             while (currentCoroutineContext().isActive && sessionId == sessionCounter.get()) {
                 if (sessionId != sessionCounter.get() || !currentCoroutineContext().isActive) return
                 _state.value = MonitoringState.Capturing
-
                 var analysisBitmap: Bitmap? = null
                 var previewBitmap: Bitmap? = null
-
                 try {
                     val captureResult = captureProvider.captureSingleFrame()
                     if (sessionId != sessionCounter.get() || !currentCoroutineContext().isActive) return
-
                     analysisBitmap = when (captureResult) {
                         is CaptureResult.Success -> captureResult.bitmap
                         is CaptureResult.Error -> {
@@ -231,32 +171,22 @@ class MonitoringController(
                             return
                         }
                     }
-
-                    previewBitmap = try {
-                        ImageProcessor.createPreviewBitmap(analysisBitmap)
-                    } catch (_: Exception) {
-                        null
-                    }
-
+                    previewBitmap = try { ImageProcessor.createPreviewBitmap(analysisBitmap) } catch (_: Exception) { null }
                     if (sessionId != sessionCounter.get() || !currentCoroutineContext().isActive) return
                     _latestBitmap.value = previewBitmap
                     _lastCaptureTimestamp.value = System.currentTimeMillis()
-
                     if (sessionId != sessionCounter.get() || !currentCoroutineContext().isActive) return
                     val currentContext = contextProvider()
                     val currentSettings = settingsProvider()
                     _state.value = MonitoringState.Analyzing(startTimeMs = System.currentTimeMillis())
-
                     val result = visionAnalyzer.analyze(
                         bitmap = analysisBitmap,
                         context = currentContext,
                         settings = currentSettings
                     )
-
                     if (sessionId != sessionCounter.get() || !currentCoroutineContext().isActive) return
                     _latestResult.value = result
                     _analysisCount.value += 1
-
                     val delaySeconds = currentSettings.delaySeconds.coerceIn(1, 600)
                     for (remaining in delaySeconds downTo 1) {
                         if (sessionId != sessionCounter.get() || !currentCoroutineContext().isActive) return
@@ -290,20 +220,22 @@ class MonitoringController(
     }
 
     /**
-     * Enqueues reset behind the lifecycle coordinator so the reset is applied only after the
-     * active monitoring job has been cancelled and joined.
+     * Invalidate the current session and clear UI state immediately. The generation bump prevents
+     * an in-flight capture/analysis from publishing stale state after resetState() returns. The
+     * queued Reset still performs serialized cancellation/join of the active monitoring Job.
      */
     fun resetState() {
+        sessionCounter.incrementAndGet()
+        _state.value = MonitoringState.Idle
+        _latestBitmap.value = null
+        _latestResult.value = null
+        _analysisCount.value = 0
+        _lastCaptureTimestamp.value = null
+
         val result = commandChannel.trySend(LifecycleCommand.Reset)
         if (result.isFailure) {
-            sessionCounter.incrementAndGet()
             activeJob?.cancel()
             activeJob = null
-            _state.value = MonitoringState.Idle
-            _latestBitmap.value = null
-            _latestResult.value = null
-            _analysisCount.value = 0
-            _lastCaptureTimestamp.value = null
         }
     }
 
