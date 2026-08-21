@@ -115,7 +115,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun askAi(question: String) {
         if (!askAiAdmission.tryAcquire()) return
-
         val prompt = question.trim()
         if (prompt.isBlank()) {
             askAiAdmission.release()
@@ -182,7 +181,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     prompt
                 )
             } catch (_: CancellationException) {
-                // Cancellation is control flow; preserve the previous result.
             } catch (error: Exception) {
                 val message = error.localizedMessage ?: error.message ?: "AI request failed."
                 _askAiResult.value = AnalysisResult(
@@ -202,15 +200,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    /**
-     * Cancels the active Ask AI request through coroutine cancellation.
-     * Provider implementations attach their native cancellation to the same coroutine,
-     * so there is no sibling cancellation race and admission is released only by the
-     * request's own finally block after provider cleanup has completed.
-     */
-    fun cancelAskAi() {
-        askAiJob?.cancel()
-    }
+    fun cancelAskAi() { askAiJob?.cancel() }
 
     fun selectModel(modelId: String) {
         val cleanModel = normalizeModelId(modelId)
@@ -219,9 +209,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
         val matched = _discoveredModels.value.find {
-            it.canonicalModelId == cleanModel ||
-                it.modelId == cleanModel ||
-                normalizeModelId(it.name) == cleanModel
+            it.canonicalModelId == cleanModel || it.modelId == cleanModel || normalizeModelId(it.name) == cleanModel
         }
         if (matched != null) {
             _selectedModel.value = matched.canonicalModelId
@@ -254,9 +242,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val persistedSelected = settingsRepository.loadSelectedModel()
         if (persistedSelected.isNotBlank()) {
             val matchingModel = compatibleModels.find {
-                it.canonicalModelId == persistedSelected ||
-                    it.modelId == persistedSelected ||
-                    normalizeModelId(it.name) == persistedSelected
+                it.canonicalModelId == persistedSelected || it.modelId == persistedSelected || normalizeModelId(it.name) == persistedSelected
             }
             if (matchingModel != null) {
                 _selectedModel.value = matchingModel.canonicalModelId
@@ -277,9 +263,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _isTestingConnection.value = true
             visionAnalyzer.discoverModels()
                 .onSuccess(::handleDiscoveredModels)
-                .onFailure {
-                    _modelValidationMessage.value = "Failed to refresh models: ${it.localizedMessage ?: "Network error"}"
-                }
+                .onFailure { _modelValidationMessage.value = "Failed to refresh models: ${it.localizedMessage ?: "Network error"}" }
             _isTestingConnection.value = false
         }
     }
@@ -316,11 +300,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun updateSettings(newSettings: CaptureSettings) {
-        val safe = CaptureSettings.createSafe(
-            newSettings.delaySeconds,
-            newSettings.maxResolutionDimension,
-            newSettings.compressionQuality
-        )
+        val safe = CaptureSettings.createSafe(newSettings.delaySeconds, newSettings.maxResolutionDimension, newSettings.compressionQuality)
         _settings.value = safe
         settingsRepository.saveSettings(safe)
     }
@@ -388,6 +368,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _currentRoute.value = ScreenRoute.MONITOR
         }
     }
+
+    fun deleteLocalModel(modelId: String): Result<Unit> = runCatching {
+        kotlinx.coroutines.runBlocking { localAiProvider.deleteModel(modelId).getOrThrow() }
+    }
+
+    fun localModelRepositoryForUi(): LocalModelRepository = localModelRepository
 
     fun stopMonitoring(appContext: Context) {
         controller.stopMonitoring()
