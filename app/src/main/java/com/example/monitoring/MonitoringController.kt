@@ -98,8 +98,9 @@ class MonitoringController(
             }
             is LifecycleCommand.Stop -> stopActiveMonitoring()
             is LifecycleCommand.Reset -> {
-                // Reset is serialized with the active job. Clear observable state only after the
-                // previous monitoring job has been cancelled and joined.
+                // Reset is serialized with the active job. Observable state has already been
+                // invalidated synchronously by resetState(); this command only performs the
+                // deterministic cancellation/join cleanup and clears again for idempotence.
                 stopActiveMonitoring()
                 _latestBitmap.value = null
                 _latestResult.value = null
@@ -223,11 +224,17 @@ class MonitoringController(
     }
 
     /**
-     * Queue reset behind the lifecycle worker. The worker invalidates and joins the active job
-     * before clearing observable state, preventing a stopped job from publishing stale values
-     * after resetState() has completed.
+     * Invalidate the current session and clear observable state immediately. The generation bump
+     * prevents an in-flight capture/analysis from publishing stale values after resetState() returns.
+     * The queued Reset then performs serialized cancellation/join cleanup in the lifecycle worker.
      */
     fun resetState() {
+        sessionCounter.incrementAndGet()
+        _state.value = MonitoringState.Idle
+        _latestBitmap.value = null
+        _latestResult.value = null
+        _analysisCount.value = 0
+        _lastCaptureTimestamp.value = null
         commandChannel.trySend(LifecycleCommand.Reset)
     }
 
