@@ -3,6 +3,7 @@ package com.example.localai
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import java.io.File
+import java.io.IOException
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -21,8 +22,7 @@ class LocalModelStoreLifecycleTest {
     @Before
     fun setUp() {
         context = ApplicationProvider.getApplicationContext()
-        context.filesDir.deleteRecursively()
-        context.filesDir.mkdirs()
+        File(context.filesDir, "local_models").deleteRecursively()
         store = LocalModelStore(context)
     }
 
@@ -47,7 +47,7 @@ class LocalModelStoreLifecycleTest {
     }
 
     @Test
-    fun invalidModelIdIsRejectedBeforeFilesystemAccess() {
+    fun invalidModelIdIsRejected() {
         val invalidIds = listOf("../escape", "../../escape", "id with spaces", "")
 
         invalidIds.forEach { id ->
@@ -73,10 +73,10 @@ class LocalModelStoreLifecycleTest {
 
         try {
             store.import(plan, object : java.io.InputStream() {
-                override fun read(): Int = throw java.io.IOException("synthetic copy failure")
+                override fun read(): Int = throw IOException("synthetic copy failure")
             })
             throw AssertionError("Expected import to fail")
-        } catch (_: java.io.IOException) {
+        } catch (_: IOException) {
             // expected
         }
 
