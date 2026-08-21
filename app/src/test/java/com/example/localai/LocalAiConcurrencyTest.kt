@@ -6,12 +6,13 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class LocalAiConcurrencyTest {
-    private val model = LocalModel(
-        id = "vision-model",
-        fileName = "model.litertlm",
+    private val firstModel = LocalModel(
+        id = "vision-model-a",
+        fileName = "model-a.litertlm",
         modelType = ModelType.LLM,
         configuration = LocalModelConfiguration(),
         capabilities = ModelCapabilities(image = true),
@@ -19,11 +20,17 @@ class LocalAiConcurrencyTest {
         importedAtEpochMillis = 1L
     )
 
+    private val secondModel = firstModel.copy(
+        id = "vision-model-b",
+        fileName = "model-b.litertlm",
+        importedAtEpochMillis = 2L
+    )
+
     @Test
     fun concurrentGenerationsAreSerialized() = runBlocking {
         val runtime = BlockingRuntime()
-        val provider = LocalAiProvider(FakeCatalog(model), runtime)
-        provider.selectModel(model.id)
+        val provider = LocalAiProvider(FakeCatalog(firstModel), runtime)
+        provider.selectModel(firstModel.id)
         runtime.loadCalls.set(0)
 
         val first = async { provider.generate("first", byteArrayOf(1)).collect {} }
@@ -42,31 +49,61 @@ class LocalAiConcurrencyTest {
     }
 
     @Test
-    fun modelSelectionWaitsForActiveGeneration() = runBlocking {
+    fun selectingAlreadyLoadedModelDoesNotReload() = runBlocking {
         val runtime = BlockingRuntime()
-        val provider = LocalAiProvider(FakeCatalog(model), runtime)
-        provider.selectModel(model.id)
+        val provider = LocalAiProvider(FakeCatalog(firstModel, secondModel), runtime)
+
+        provider.selectModel(firstModel.id)
+        runtime.loadCalls.set(0)
+
+        val result = provider.selectModel(firstModel.id)
+
+        assertTrue(result.isSuccess)
+        assertEquals(0, runtime.loadCalls.get())
+        assertEquals(LocalModelState.Ready(firstModel.id), provider.modelState.value)
+    }
+
+    @Test
+    fun modelSelectionCancelsActiveGenerationBeforeSwitching() = runBlocking {
+        val runtime = BlockingRuntime()
+        val provider = LocalAiProvider(FakeCatalog(firstModel, secondModel), runtime)
+        provider.selectModel(firstModel.id)
         runtime.loadCalls.set(0)
 
         val generation = async { provider.generate("first", byteArrayOf(1)).collect {} }
         runtime.firstStarted.await()
 
-        val replacement = async { provider.selectModel(model.id) }
-        assertEquals(0, runtime.loadCalls.get())
-        assertFalse(replacement.isCompleted)
-
-        runtime.release()
+        val replacement = provider.selectModel(secondModel.id)
         generation.await()
-        replacement.await()
 
+        assertTrue(replacement.isSuccess)
+        assertTrue(runtime.cancelled)
         assertEquals(1, runtime.loadCalls.get())
+        assertEquals(secondModel.id, provider.selectedModelId())
+        assertEquals(LocalModelState.Ready(secondModel.id), provider.modelState.value)
     }
 
-    private class FakeCatalog(private val model: LocalModel) : LocalModelCatalog {
-        override suspend fun listModels(): List<LocalModel> = listOf(model)
+    @Test
+    fun failedModelSwitchClearsStaleSelection() = runBlocking {
+        val runtime = BlockingRuntime(failModelId = secondModel.id)
+        val provider = LocalAiProvider(FakeCatalog(firstModel, secondModel), runtime)
+        provider.selectModel(firstModel.id)
+        runtime.loadCalls.set(0)
+
+        val result = provider.selectModel(secondModel.id)
+
+        assertTrue(result.isFailure)
+        assertEquals(null, provider.selectedModelId())
+        assertTrue(provider.modelState.value is LocalModelState.Failed)
     }
 
-    private class BlockingRuntime : LocalModelRuntime {
+    private class FakeCatalog(private vararg val models: LocalModel) : LocalModelCatalog {
+        override suspend fun listModels(): List<LocalModel> = models.toList()
+    }
+
+    private class BlockingRuntime(
+        private val failModelId: String? = null
+    ) : LocalModelRuntime {
         val firstStarted = CompletableDeferred<Unit>()
         val secondStarted = CompletableDeferred<Unit>()
         val active = AtomicInteger(0)
@@ -75,9 +112,14 @@ class LocalAiConcurrencyTest {
         val loadCalls = AtomicInteger(0)
         private val releaseGate = CompletableDeferred<Unit>()
         private var generationCount = 0
+        var cancelled = false
+            private set
 
         override suspend fun load(model: LocalModel): Result<Unit> {
             loadCalls.incrementAndGet()
+            if (model.id == failModelId) {
+                return Result.failure(IllegalStateException("load failed"))
+            }
             return Result.success(Unit)
         }
 
@@ -103,6 +145,7 @@ class LocalAiConcurrencyTest {
         override suspend fun unload() = Unit
 
         override suspend fun cancel() {
+            cancelled = true
             releaseGate.complete(Unit)
         }
 
