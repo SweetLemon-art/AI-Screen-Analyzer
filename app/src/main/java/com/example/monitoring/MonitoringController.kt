@@ -1,8 +1,9 @@
 package com.example.monitoring
 
 import android.graphics.Bitmap
+import com.example.ai.AiProviderRouter
+import com.example.ai.AiProviderType
 import com.example.ai.AnalysisResult
-import com.example.ai.VisionAnalyzer
 import com.example.capture.CaptureResult
 import com.example.capture.ScreenCaptureEngine
 import com.example.capture.ScreenCaptureLifecycleProvider
@@ -28,14 +29,15 @@ import java.util.concurrent.atomic.AtomicLong
 private sealed interface LifecycleCommand {
     data class Start(
         val contextProvider: () -> AnalysisContext,
-        val settingsProvider: () -> CaptureSettings
+        val settingsProvider: () -> CaptureSettings,
+        val providerProvider: () -> AiProviderType
     ) : LifecycleCommand
     data object Stop : LifecycleCommand
     data object Reset : LifecycleCommand
 }
 
 class MonitoringController(
-    private val visionAnalyzer: VisionAnalyzer,
+    private val aiProviderRouter: AiProviderRouter,
     private val coroutineScope: CoroutineScope,
     private val captureProvider: ScreenCaptureProvider = ScreenCaptureEngine
 ) {
@@ -51,6 +53,7 @@ class MonitoringController(
     val lastCaptureTimestamp: StateFlow<Long?> = _lastCaptureTimestamp.asStateFlow()
 
     private var activeJob: Job? = null
+    private var activeProviderType: AiProviderType? = null
     private val sessionCounter = AtomicLong(0)
     private val commandChannel = Channel<LifecycleCommand>(Channel.CONFLATED)
 
@@ -75,9 +78,7 @@ class MonitoringController(
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
-                    _state.value = MonitoringState.Error(
-                        e.localizedMessage ?: "Unexpected monitoring lifecycle error"
-                    )
+                    _state.value = MonitoringState.Error(e.localizedMessage ?: "Unexpected monitoring lifecycle error")
                 }
             }
         }
@@ -88,9 +89,10 @@ class MonitoringController(
             is LifecycleCommand.Start -> {
                 stopActiveMonitoring()
                 val newSessionId = sessionCounter.incrementAndGet()
+                activeProviderType = command.providerProvider()
                 _state.value = MonitoringState.Starting
                 activeJob = coroutineScope.launch {
-                    runMonitoringLoop(newSessionId, command.contextProvider, command.settingsProvider)
+                    runMonitoringLoop(newSessionId, command.contextProvider, command.settingsProvider, activeProviderType ?: AiProviderType.GEMINI)
                 }
             }
             is LifecycleCommand.Stop -> stopActiveMonitoring()
@@ -108,52 +110,45 @@ class MonitoringController(
         sessionCounter.incrementAndGet()
         _state.value = MonitoringState.Stopping
         val job = activeJob
+        val provider = activeProviderType
+        activeJob = null
+        activeProviderType = null
         if (job != null) {
             job.cancel()
-            try {
-                job.join()
-            } catch (_: CancellationException) {
-                // The lifecycle worker itself remains active; cancellation of the monitoring job
-                // is expected and must not abort command processing.
-            }
-            if (activeJob === job) activeJob = null
+            try { job.join() } catch (_: CancellationException) { }
+        }
+        if (provider != null) {
+            try { aiProviderRouter.cancel(provider) } catch (_: Exception) { }
         }
         _state.value = MonitoringState.Idle
     }
 
     fun startMonitoring(
         contextProvider: () -> AnalysisContext,
-        settingsProvider: () -> CaptureSettings
+        settingsProvider: () -> CaptureSettings,
+        providerProvider: () -> AiProviderType
     ) {
-        commandChannel.trySend(LifecycleCommand.Start(contextProvider, settingsProvider))
+        commandChannel.trySend(LifecycleCommand.Start(contextProvider, settingsProvider, providerProvider))
     }
 
-    fun stopMonitoring() {
-        commandChannel.trySend(LifecycleCommand.Stop)
-    }
+    fun stopMonitoring() { commandChannel.trySend(LifecycleCommand.Stop) }
 
     private suspend fun runMonitoringLoop(
         sessionId: Long,
         contextProvider: () -> AnalysisContext,
-        settingsProvider: () -> CaptureSettings
+        settingsProvider: () -> CaptureSettings,
+        providerType: AiProviderType
     ) {
         try {
             val becameReady = withTimeoutOrNull(CAPTURE_READY_TIMEOUT_MS) {
-                captureProvider.isReady.first { ready ->
-                    ready || sessionId != sessionCounter.get() || !currentCoroutineContext().isActive
-                }
+                captureProvider.isReady.first { ready -> ready || sessionId != sessionCounter.get() || !currentCoroutineContext().isActive }
             } == true
             if (!becameReady || sessionId != sessionCounter.get() || !currentCoroutineContext().isActive) {
-                if (sessionId == sessionCounter.get() && currentCoroutineContext().isActive) {
-                    _state.value = MonitoringState.Error(
-                        "Screen capture session did not become ready. Please start monitoring again."
-                    )
-                }
+                if (sessionId == sessionCounter.get() && currentCoroutineContext().isActive) _state.value = MonitoringState.Error("Screen capture session did not become ready. Please start monitoring again.")
                 return
             }
 
             while (currentCoroutineContext().isActive && sessionId == sessionCounter.get()) {
-                if (sessionId != sessionCounter.get() || !currentCoroutineContext().isActive) return
                 _state.value = MonitoringState.Capturing
                 var analysisBitmap: Bitmap? = null
                 var previewBitmap: Bitmap? = null
@@ -164,9 +159,7 @@ class MonitoringController(
                     analysisBitmap = when (captureResult) {
                         is CaptureResult.Success -> captureResult.bitmap
                         is CaptureResult.Error -> {
-                            if (sessionId == sessionCounter.get()) {
-                                _state.value = MonitoringState.Error(captureResult.message)
-                            }
+                            if (sessionId == sessionCounter.get()) _state.value = MonitoringState.Error(captureResult.message)
                             return
                         }
                     }
@@ -178,71 +171,43 @@ class MonitoringController(
                     if (sessionId != sessionCounter.get() || !currentCoroutineContext().isActive) return
                     val currentContext = contextProvider()
                     val currentSettings = settingsProvider()
-                    _state.value = MonitoringState.Analyzing(startTimeMs = System.currentTimeMillis())
-                    val result = visionAnalyzer.analyze(
-                        bitmap = analysisBitmap,
-                        context = currentContext,
-                        settings = currentSettings
-                    )
+                    _state.value = MonitoringState.Analyzing(System.currentTimeMillis())
+                    val result = aiProviderRouter.analyze(providerType, analysisBitmap, currentContext, currentSettings)
                     if (sessionId != sessionCounter.get() || !currentCoroutineContext().isActive) return
                     _latestResult.value = result
                     _analysisCount.value += 1
                     val delaySeconds = currentSettings.delaySeconds.coerceIn(1, 600)
                     for (remaining in delaySeconds downTo 1) {
                         if (sessionId != sessionCounter.get() || !currentCoroutineContext().isActive) return
-                        _state.value = MonitoringState.Waiting(
-                            remainingSeconds = remaining,
-                            totalSeconds = delaySeconds
-                        )
+                        _state.value = MonitoringState.Waiting(remaining, delaySeconds)
                         delay(1000L)
                     }
                 } finally {
-                    if (analysisBitmap != null && !analysisBitmap.isRecycled) {
-                        analysisBitmap.recycle()
-                    }
-                    if (!previewPublished && previewBitmap != null && !previewBitmap.isRecycled) {
-                        previewBitmap.recycle()
-                    }
+                    if (analysisBitmap != null && !analysisBitmap.isRecycled) analysisBitmap.recycle()
+                    if (!previewPublished && previewBitmap != null && !previewBitmap.isRecycled) previewBitmap.recycle()
                 }
             }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            if (sessionId == sessionCounter.get()) {
-                _state.value = MonitoringState.Error(e.localizedMessage ?: "Unexpected error during monitoring")
-            }
+            if (sessionId == sessionCounter.get()) _state.value = MonitoringState.Error(e.localizedMessage ?: "Unexpected error during monitoring")
         } finally {
-            if (sessionId == sessionCounter.get() &&
-                _state.value !is MonitoringState.Idle &&
-                _state.value !is MonitoringState.Error &&
-                _state.value !is MonitoringState.Stopping
-            ) {
-                _state.value = MonitoringState.Idle
-            }
+            if (sessionId == sessionCounter.get() && _state.value !is MonitoringState.Idle && _state.value !is MonitoringState.Error && _state.value !is MonitoringState.Stopping) _state.value = MonitoringState.Idle
         }
     }
 
     private fun publishLatestBitmap(newBitmap: Bitmap?) {
         val previousBitmap = _latestBitmap.value
         _latestBitmap.value = newBitmap
-        if (previousBitmap != null && previousBitmap !== newBitmap && !previousBitmap.isRecycled) {
-            previousBitmap.recycle()
-        }
+        if (previousBitmap != null && previousBitmap !== newBitmap && !previousBitmap.isRecycled) previousBitmap.recycle()
     }
 
     private fun clearLatestBitmap() {
         val previousBitmap = _latestBitmap.value
         _latestBitmap.value = null
-        if (previousBitmap != null && !previousBitmap.isRecycled) {
-            previousBitmap.recycle()
-        }
+        if (previousBitmap != null && !previousBitmap.isRecycled) previousBitmap.recycle()
     }
 
-    /**
-     * Invalidate the current session and clear observable state immediately. The generation bump
-     * prevents an in-flight capture/analysis from publishing stale values after resetState() returns.
-     * The queued Reset then performs serialized cancellation/join cleanup in the lifecycle worker.
-     */
     fun resetState() {
         sessionCounter.incrementAndGet()
         _state.value = MonitoringState.Idle
@@ -253,7 +218,5 @@ class MonitoringController(
         commandChannel.trySend(LifecycleCommand.Reset)
     }
 
-    private companion object {
-        const val CAPTURE_READY_TIMEOUT_MS = 10_000L
-    }
+    private companion object { const val CAPTURE_READY_TIMEOUT_MS = 10_000L }
 }

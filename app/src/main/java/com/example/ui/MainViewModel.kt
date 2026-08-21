@@ -61,15 +61,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val askAiAdmission = AskAiAdmissionGate()
     private var askAiJob: Job? = null
     private var activeAskAiProvider: AiProviderType? = null
-    val controller = MonitoringController(visionAnalyzer, viewModelScope)
+    val controller = MonitoringController(aiProviderRouter, viewModelScope)
     val rateLimitState: StateFlow<RateLimitState> = visionAnalyzer.rateLimitState
     private val _savedContexts = MutableStateFlow(settingsRepository.loadContexts())
     val savedContexts: StateFlow<List<AnalysisContext>> = _savedContexts.asStateFlow()
-    private val _currentContext = MutableStateFlow(
-        _savedContexts.value.find { it.id == settingsRepository.loadSelectedContextId() }
-            ?: _savedContexts.value.firstOrNull()
-            ?: AnalysisContext.DEFAULT
-    )
+    private val _currentContext = MutableStateFlow(_savedContexts.value.find { it.id == settingsRepository.loadSelectedContextId() } ?: _savedContexts.value.firstOrNull() ?: AnalysisContext.DEFAULT)
     val currentContext: StateFlow<AnalysisContext> = _currentContext.asStateFlow()
     private val _settings = MutableStateFlow(settingsRepository.loadSettings())
     val settings: StateFlow<CaptureSettings> = _settings.asStateFlow()
@@ -113,27 +109,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val prompt = question.trim()
         if (prompt.isBlank()) {
             askAiAdmission.release()
-            _askAiResult.value = AnalysisResult(
-                contextName = _currentContext.value.name,
-                summary = "ASK_AI_ERROR",
-                observations = listOf("Question must not be blank."),
-                conclusion = "Enter a question before asking AI.",
-                isSuccess = false,
-                errorMessage = "Question must not be blank."
-            )
+            _askAiResult.value = AnalysisResult(_currentContext.value.name, "ASK_AI_ERROR", listOf("Question must not be blank."), "Enter a question before asking AI.", isSuccess = false, errorMessage = "Question must not be blank.")
             return
         }
         val bitmap = latestBitmap.value
         if (bitmap == null || bitmap.isRecycled || bitmap.width <= 0 || bitmap.height <= 0) {
             askAiAdmission.release()
-            _askAiResult.value = AnalysisResult(
-                contextName = _currentContext.value.name,
-                summary = "ASK_AI_ERROR",
-                observations = listOf("No valid captured screen is available."),
-                conclusion = "Start monitoring once to capture a screen before asking AI.",
-                isSuccess = false,
-                errorMessage = "No valid captured screen is available."
-            )
+            _askAiResult.value = AnalysisResult(_currentContext.value.name, "ASK_AI_ERROR", listOf("No valid captured screen is available."), "Start monitoring once to capture a screen before asking AI.", isSuccess = false, errorMessage = "No valid captured screen is available.")
             return
         }
         val providerType = _selectedAiProvider.value
@@ -144,27 +126,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 if (providerType == AiProviderType.LOCAL) {
                     val localModel = localModelRepository.listModels().firstOrNull { it.capabilities.image }
                     if (localModel == null) {
-                        _askAiResult.value = AnalysisResult(
-                            contextName = _currentContext.value.name,
-                            summary = "LOCAL_AI_ERROR",
-                            observations = listOf("No imported local model with image capability is available."),
-                            conclusion = "Import an image-capable LiteRT-LM model in Local AI first.",
-                            isSuccess = false,
-                            errorMessage = "No image-capable local model is available."
-                        )
+                        _askAiResult.value = AnalysisResult(_currentContext.value.name, "LOCAL_AI_ERROR", listOf("No imported local model with image capability is available."), "Import an image-capable LiteRT-LM model in Local AI first.", isSuccess = false, errorMessage = "No image-capable local model is available.")
                         return@launch
                     }
                     val loadResult = localAiProvider.selectModel(localModel.id)
                     if (loadResult.isFailure) {
                         val message = loadResult.exceptionOrNull()?.message ?: "Failed to load local model."
-                        _askAiResult.value = AnalysisResult(
-                            contextName = _currentContext.value.name,
-                            summary = "LOCAL_AI_ERROR",
-                            observations = listOf(message),
-                            conclusion = "Check the imported model and try again.",
-                            isSuccess = false,
-                            errorMessage = message
-                        )
+                        _askAiResult.value = AnalysisResult(_currentContext.value.name, "LOCAL_AI_ERROR", listOf(message), "Check the imported model and try again.", isSuccess = false, errorMessage = message)
                         return@launch
                     }
                 }
@@ -172,14 +140,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             } catch (_: CancellationException) {
             } catch (error: Exception) {
                 val message = error.localizedMessage ?: error.message ?: "AI request failed."
-                _askAiResult.value = AnalysisResult(
-                    contextName = _currentContext.value.name,
-                    summary = "ASK_AI_ERROR",
-                    observations = listOf(message),
-                    conclusion = "Try again or switch AI providers.",
-                    isSuccess = false,
-                    errorMessage = message
-                )
+                _askAiResult.value = AnalysisResult(_currentContext.value.name, "ASK_AI_ERROR", listOf(message), "Try again or switch AI providers.", isSuccess = false, errorMessage = message)
             } finally {
                 _isAskingAi.value = false
                 askAiJob = null
@@ -199,9 +160,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _selectedModel.value = matched.canonicalModelId
             settingsRepository.saveSelectedModel(matched.canonicalModelId)
             _modelValidationMessage.value = null
-        } else {
-            _modelValidationMessage.value = "MODEL_NOT_AVAILABLE: Selected model '$cleanModel' is not available in discovered compatible models."
-        }
+        } else _modelValidationMessage.value = "MODEL_NOT_AVAILABLE: Selected model '$cleanModel' is not available in discovered compatible models."
     }
 
     fun clearSelectedModel() { _selectedModel.value = ""; settingsRepository.clearSelectedModel() }
@@ -226,34 +185,36 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         } else _selectedModel.value = ""
     }
 
-    private suspend fun discoverModels(): Result<List<GeminiModel>> =
-        modelDiscoveryCoordinator.discover { visionAnalyzer.discoverModels() }
+    private suspend fun discoverModels(): Result<List<GeminiModel>> = modelDiscoveryCoordinator.discover { visionAnalyzer.discoverModels() }
 
-    private suspend fun discoverModelsIfNeeded(): Result<Unit> =
-        modelDiscoveryCoordinator.discover {
-            if (_hasFreshModelDiscovery.value) {
-                Result.success(Unit)
-            } else {
-                visionAnalyzer.discoverModels().map {
-                    handleDiscoveredModels(it)
-                    Unit
-                }
+    private suspend fun discoverModelsIfNeeded(): Result<Unit> = modelDiscoveryCoordinator.discover {
+        if (_hasFreshModelDiscovery.value) Result.success(Unit) else visionAnalyzer.discoverModels().map { handleDiscoveredModels(it); Unit }
+    }
+
+    private suspend fun prepareMonitoringProvider(providerType: AiProviderType): Result<Unit> {
+        return when (providerType) {
+            AiProviderType.GEMINI -> {
+                if (!apiKeyStore.hasApiKey()) return Result.failure(IllegalStateException("Gemini API key is required."))
+                discoverModelsIfNeeded()
+            }
+            AiProviderType.LOCAL -> {
+                val localModel = localModelRepository.listModels().firstOrNull { it.capabilities.image }
+                    ?: return Result.failure(IllegalStateException("No imported local model with image capability is available."))
+                localAiProvider.selectModel(localModel.id).map { Unit }
             }
         }
+    }
 
     fun fetchAvailableModels() {
         if (_isTestingConnection.value) return
         viewModelScope.launch {
             _isTestingConnection.value = true
-            discoverModels()
-                .onSuccess(::handleDiscoveredModels)
-                .onFailure { _modelValidationMessage.value = "Failed to refresh models: ${it.localizedMessage ?: "Network error"}" }
+            discoverModels().onSuccess(::handleDiscoveredModels).onFailure { _modelValidationMessage.value = "Failed to refresh models: ${it.localizedMessage ?: "Network error"}" }
             _isTestingConnection.value = false
         }
     }
 
     fun selectContext(context: AnalysisContext) { _currentContext.value = context; settingsRepository.saveSelectedContextId(context.id) }
-
     fun saveAndSelectContext(name: String, instructions: String, language: String) {
         val newContext = AnalysisContext("custom_${System.currentTimeMillis()}", name.trim().ifBlank { "Custom Context" }, instructions.trim().ifBlank { "Analyze what is visible on screen." }, language.trim().ifBlank { "English" }, false)
         val updated = listOf(newContext) + _savedContexts.value.filter { it.id != newContext.id }
@@ -271,7 +232,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (!saved) { _hasApiKey.value = false; _maskedApiKey.value = ""; _testResult.value = ConnectionTestResult.Error("Failed to securely save the Gemini API key. Please try again."); return }
         _hasApiKey.value = apiKeyStore.hasApiKey(); _maskedApiKey.value = apiKeyStore.getMaskedApiKey(); _testResult.value = null; testConnection()
     }
-
     fun clearApiKey() { apiKeyStore.clearApiKey(); _hasApiKey.value = false; _maskedApiKey.value = ""; _testResult.value = null }
 
     fun testConnection() {
@@ -285,31 +245,35 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _isTestingConnection.value = false
         }
     }
-
     fun clearTestResult() { _testResult.value = null }
 
     fun onMediaProjectionApproved(resultCode: Int, data: Intent, appContext: Context) {
         viewModelScope.launch {
-            if (!_hasFreshModelDiscovery.value) {
-                _modelValidationMessage.value = "Refreshing model discovery before starting monitoring..."
-                discoverModelsIfNeeded().onFailure {
-                    _modelValidationMessage.value = "DISCOVERY_FAILED: Cannot start monitoring. Model discovery failed: ${it.localizedMessage ?: "Network error"}"
+            val providerType = _selectedAiProvider.value
+            _modelValidationMessage.value = if (providerType == AiProviderType.LOCAL) "Preparing Local AI..." else "Refreshing Gemini model discovery before starting monitoring..."
+            prepareMonitoringProvider(providerType).onFailure {
+                _modelValidationMessage.value = "PROVIDER_NOT_READY: ${it.localizedMessage ?: "Selected AI provider is not ready."}"
+                return@launch
+            }
+            if (providerType == AiProviderType.GEMINI) {
+                val currentSelected = _selectedModel.value
+                if (currentSelected.isBlank() || !_discoveredModels.value.any { it.canonicalModelId == currentSelected }) {
+                    _modelValidationMessage.value = "MODEL_NOT_AVAILABLE: Please select a valid compatible Gemini model before starting monitoring."
                     return@launch
                 }
             }
-            if (!_hasFreshModelDiscovery.value) { _modelValidationMessage.value = "DISCOVERY_REQUIRED: Model discovery must complete before monitoring can start."; return@launch }
-            val currentSelected = _selectedModel.value
-            if (currentSelected.isBlank() || !_discoveredModels.value.any { it.canonicalModelId == currentSelected }) { _modelValidationMessage.value = "MODEL_NOT_AVAILABLE: Please select a valid compatible model before starting monitoring."; return@launch }
             ScreenCaptureService.startService(appContext, resultCode, data)
-            controller.startMonitoring(contextProvider = { _currentContext.value }, settingsProvider = { _settings.value })
+            controller.startMonitoring(
+                contextProvider = { _currentContext.value },
+                settingsProvider = { _settings.value },
+                providerProvider = { _selectedAiProvider.value }
+            )
             _currentRoute.value = ScreenRoute.MONITOR
         }
     }
 
     suspend fun deleteLocalModel(modelId: String): Result<Unit> = localAiProvider.deleteModel(modelId)
-
     fun localModelRepositoryForUi(): LocalModelRepository = localModelRepository
-
     fun stopMonitoring(appContext: Context) { controller.stopMonitoring(); ScreenCaptureService.stopService(appContext); ScreenCaptureEngine.stop() }
 
     override fun onCleared() {
