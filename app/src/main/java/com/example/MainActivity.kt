@@ -135,7 +135,7 @@ fun MainAppScaffold(viewModel: MainViewModel) {
                     ScreenRoute.MONITOR -> MonitorScreen(viewModel)
                     ScreenRoute.ASK_AI -> AskAiScreen(viewModel)
                     ScreenRoute.CONTEXT -> ContextScreen(viewModel)
-                    ScreenRoute.LOCAL_AI -> LocalModelsScreen()
+                    ScreenRoute.LOCAL_AI -> LocalModelsScreen(viewModel)
                     ScreenRoute.SETTINGS -> SettingsScreen(viewModel)
                 }
             }
