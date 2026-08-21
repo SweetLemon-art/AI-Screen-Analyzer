@@ -5,6 +5,7 @@ import com.example.ai.AnalysisResult
 import com.example.ai.VisionAnalyzer
 import com.example.capture.CaptureResult
 import com.example.capture.ScreenCaptureEngine
+import com.example.capture.ScreenCaptureLifecycleProvider
 import com.example.capture.ScreenCaptureProvider
 import com.example.data.AnalysisContext
 import com.example.data.CaptureSettings
@@ -24,9 +25,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.atomic.AtomicLong
 
-/**
- * Commands handled sequentially by the single lifecycle coordinator.
- */
+/** Commands handled sequentially by the single lifecycle coordinator. */
 private sealed interface LifecycleCommand {
     data class Start(
         val contextProvider: () -> AnalysisContext,
@@ -34,6 +33,8 @@ private sealed interface LifecycleCommand {
     ) : LifecycleCommand
 
     data object Stop : LifecycleCommand
+
+    data object Reset : LifecycleCommand
 }
 
 /**
@@ -55,10 +56,9 @@ class MonitoringController(
     /**
      * UI-owned preview snapshot.
      *
-     * The controller owns a reference to only the current preview bitmap. Replacing the StateFlow
-     * value intentionally drops the controller's reference to the previous preview; the previous
-     * bitmap must NOT be manually recycled here because Compose/RenderThread may still be using it.
-     * Once the UI releases it, normal Bitmap/GC lifecycle can reclaim it.
+     * Replacing the StateFlow intentionally drops the controller's reference to the previous
+     * preview. The previous bitmap must not be manually recycled because Compose/RenderThread
+     * may still be using it. Once the UI releases it, normal Bitmap/GC lifecycle can reclaim it.
      */
     private val _latestBitmap = MutableStateFlow<Bitmap?>(null)
     val latestBitmap: StateFlow<Bitmap?> = _latestBitmap.asStateFlow()
@@ -87,6 +87,14 @@ class MonitoringController(
         }
 
     init {
+        if (captureProvider is ScreenCaptureLifecycleProvider) {
+            captureProvider.setOnSessionStoppedListener {
+                // MediaProjection termination is an authoritative external STOP event.
+                // Route it through the same serialized lifecycle coordinator as UI STOP.
+                stopMonitoring()
+            }
+        }
+
         coroutineScope.launch {
             for (command in commandChannel) {
                 try {
@@ -118,27 +126,37 @@ class MonitoringController(
                 if (newSessionId != sessionCounter.get()) return
 
                 _state.value = MonitoringState.Starting
-
-                val job = coroutineScope.launch {
+                activeJob = coroutineScope.launch {
                     runMonitoringLoop(newSessionId, command.contextProvider, command.settingsProvider)
                 }
-                activeJob = job
             }
 
             is LifecycleCommand.Stop -> {
-                sessionCounter.incrementAndGet()
-                _state.value = MonitoringState.Stopping
+                stopActiveMonitoring()
+            }
 
-                activeJob?.cancel()
-                try {
-                    activeJob?.join()
-                } catch (_: CancellationException) {
-                    // Cancellation of the monitoring child is expected during STOP.
-                }
-                activeJob = null
-                _state.value = MonitoringState.Idle
+            is LifecycleCommand.Reset -> {
+                stopActiveMonitoring()
+                _latestBitmap.value = null
+                _latestResult.value = null
+                _analysisCount.value = 0
+                _lastCaptureTimestamp.value = null
             }
         }
+    }
+
+    private suspend fun stopActiveMonitoring() {
+        sessionCounter.incrementAndGet()
+        _state.value = MonitoringState.Stopping
+
+        activeJob?.cancel()
+        try {
+            activeJob?.join()
+        } catch (_: CancellationException) {
+            // Cancellation of the monitoring child is expected during STOP.
+        }
+        activeJob = null
+        _state.value = MonitoringState.Idle
     }
 
     fun startMonitoring(
@@ -154,6 +172,7 @@ class MonitoringController(
             sessionCounter.incrementAndGet()
             _state.value = MonitoringState.Stopping
             activeJob?.cancel()
+            activeJob = null
             _state.value = MonitoringState.Idle
         }
     }
@@ -166,13 +185,10 @@ class MonitoringController(
      * - A separate downscaled preview is retained for the UI when possible.
      * - The full-resolution analysis bitmap is recycled after AI processing finishes,
      *   including cancellation/error paths, when it is not the bitmap currently exposed to UI.
-     * - A failed preview conversion never exposes the full-resolution analysis bitmap to the UI;
-     *   this keeps the large analysis buffer eligible for immediate cleanup after inference.
-     * - If preview generation intentionally returns the source bitmap (no scaling required), that
-     *   bitmap remains UI-owned and is not manually recycled by the controller.
-     * - Replaced UI preview bitmaps are NOT manually recycled by the controller because Compose/
-     *   RenderThread may still be using the previous snapshot. Replacing the StateFlow drops the
-     *   controller's reference and the UI/GC lifecycle owns the remaining reference.
+     * - A failed preview conversion never exposes the full-resolution analysis bitmap to the UI.
+     * - If preview generation returns the source bitmap, that bitmap remains UI-owned.
+     * - Replaced UI preview bitmaps are not manually recycled because Compose/RenderThread may
+     *   still be using the previous snapshot; replacing StateFlow drops this controller reference.
      */
     private suspend fun runMonitoringLoop(
         sessionId: Long,
@@ -273,12 +289,22 @@ class MonitoringController(
         }
     }
 
+    /**
+     * Enqueues reset behind the lifecycle coordinator so the reset is applied only after the
+     * active monitoring job has been cancelled and joined.
+     */
     fun resetState() {
-        stopMonitoring()
-        _latestBitmap.value = null
-        _latestResult.value = null
-        _analysisCount.value = 0
-        _lastCaptureTimestamp.value = null
+        val result = commandChannel.trySend(LifecycleCommand.Reset)
+        if (result.isFailure) {
+            sessionCounter.incrementAndGet()
+            activeJob?.cancel()
+            activeJob = null
+            _state.value = MonitoringState.Idle
+            _latestBitmap.value = null
+            _latestResult.value = null
+            _analysisCount.value = 0
+            _lastCaptureTimestamp.value = null
+        }
     }
 
     private companion object {
