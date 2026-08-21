@@ -142,7 +142,6 @@ class GeminiVisionAnalyzer(
         val canonicalModelIdToUse = matchingModel.canonicalModelId
 
         try {
-            // Process and encode image to Base64 (temporary scaled bitmaps are recycled inside processForGeminiBase64)
             val base64Image = ImageProcessor.processForGeminiBase64(
                 rawBitmap = bitmap,
                 maxDimension = settings.maxResolutionDimension,
@@ -167,10 +166,8 @@ class GeminiVisionAnalyzer(
                 val contentObj = JSONObject()
                 val partsArray = JSONArray()
 
-                // Text prompt part
                 partsArray.put(JSONObject().put("text", promptText))
 
-                // Inline image part
                 val imagePart = JSONObject().apply {
                     val inlineData = JSONObject().apply {
                         put("mimeType", "image/jpeg")
@@ -184,7 +181,6 @@ class GeminiVisionAnalyzer(
                 contentsArray.put(contentObj)
                 put("contents", contentsArray)
 
-                // Structured JSON response schema
                 val responseSchema = JSONObject().apply {
                     put("type", "OBJECT")
                     val properties = JSONObject().apply {
@@ -227,7 +223,6 @@ class GeminiVisionAnalyzer(
                     .post(requestBody)
                     .build()
 
-                // Execute network call with guaranteed Response.use { ... } cleanup
                 val (statusCode, responseBodyString, isSuccess, retryAfterHeader) = executeCancellationAwareCall(request).use { response ->
                     ResponseSummary(
                         statusCode = response.code,
@@ -256,7 +251,6 @@ class GeminiVisionAnalyzer(
                     )
                 }
 
-                // Handle HTTP 404 Model Not Found
                 if (statusCode == 404) {
                     val duration = System.currentTimeMillis() - startTime
                     return@withContext AnalysisResult(
@@ -271,35 +265,40 @@ class GeminiVisionAnalyzer(
                     )
                 }
 
-                // Handle HTTP 429 Rate-limit with bounded backoff
-                if (statusCode == 429) {
-                    _rateLimitState.value = RateLimitState.RATE_LIMITED
-                    val retryAfterSeconds = retryAfterHeader?.toIntOrNull()?.coerceIn(1, 30)
-                        ?: (2.0.pow(attempt.toDouble()).toLong().coerceIn(2L, 30L)).toInt()
+                // Retry rate limits and transient server failures. Client errors such as
+                // 400/401/403 remain terminal because retrying the same request will not fix them.
+                val isTransientServerError = statusCode in 500..599
+                if (statusCode == 429 || isTransientServerError) {
+                    if (statusCode == 429) {
+                        _rateLimitState.value = RateLimitState.RATE_LIMITED
+                    }
 
                     if (attempt < maxRetries) {
+                        val retryAfterSeconds = retryAfterHeader?.toIntOrNull()?.coerceIn(1, 30)
+                            ?: (2.0.pow(attempt.toDouble()).toLong().coerceIn(2L, 30L)).toInt()
                         attempt++
-                        // Delay must be cancellation-aware
                         delay(retryAfterSeconds * 1000L)
                         continue
-                    } else {
-                        // Max retries exceeded
-                        val duration = System.currentTimeMillis() - startTime
-                        val userErrorMessage = "RATE_LIMITED: Gemini API rate limit reached."
-                        return@withContext AnalysisResult(
-                            contextName = context.name,
-                            summary = "RATE_LIMITED",
-                            observations = listOf("Gemini API rate limit reached."),
-                            conclusion = "Wait for rate limit window or increase delay in Settings.",
-                            rawResponse = "",
-                            isSuccess = false,
-                            errorMessage = userErrorMessage,
-                            processingDurationMs = duration
-                        )
                     }
+
+                    val duration = System.currentTimeMillis() - startTime
+                    val userErrorMessage = if (statusCode == 429) {
+                        "RATE_LIMITED: Gemini API rate limit reached."
+                    } else {
+                        sanitizeHttpError(statusCode, responseBodyString)
+                    }
+                    return@withContext AnalysisResult(
+                        contextName = context.name,
+                        summary = if (statusCode == 429) "RATE_LIMITED" else "Analysis request failed ($statusCode)",
+                        observations = listOf(userErrorMessage),
+                        conclusion = "Please try again later.",
+                        rawResponse = "",
+                        isSuccess = false,
+                        errorMessage = userErrorMessage,
+                        processingDurationMs = duration
+                    )
                 }
 
-                // Non-429 error response (e.g. 401, 403, 5xx)
                 val duration = System.currentTimeMillis() - startTime
                 val userErrorMessage = sanitizeHttpError(statusCode, responseBodyString)
                 val summaryCode = when (statusCode) {
@@ -328,11 +327,10 @@ class GeminiVisionAnalyzer(
                 conclusion = "Please try again later.",
                 rawResponse = "",
                 isSuccess = false,
-                errorMessage = "Gemini API rate limit reached.",
+                errorMessage = "Gemini API request failed after retries.",
                 processingDurationMs = duration
             )
         } catch (e: CancellationException) {
-            // MUST propagate cancellation promptly
             throw e
         } catch (e: Exception) {
             val duration = System.currentTimeMillis() - startTime
@@ -354,9 +352,6 @@ class GeminiVisionAnalyzer(
         }
     }
 
-    /**
-     * Verifies the configured API key using models.list dynamic model discovery.
-     */
     override suspend fun testConnection(): ConnectionTestResult = withContext(Dispatchers.IO) {
         val apiKey = apiKeyStore.getApiKey()
         if (apiKey.isNullOrBlank()) {
@@ -378,9 +373,6 @@ class GeminiVisionAnalyzer(
         )
     }
 
-    /**
-     * Discovers available models from Gemini API that support generateContent with full pagination.
-     */
     override suspend fun discoverModels(): Result<List<GeminiModel>> = withContext(Dispatchers.IO) {
         val apiKey = apiKeyStore.getApiKey()
         if (apiKey.isNullOrBlank()) {
@@ -524,136 +516,9 @@ class GeminiVisionAnalyzer(
             )
         }
 
-        val nextPageToken = root.optString("nextPageToken", "").trim().ifBlank { null }
-        return ModelsPage(models = modelsList, nextPageToken = nextPageToken)
+        return ModelsPage(
+            models = modelsList,
+            nextPageToken = root.optString("nextPageToken").ifBlank { null }
+        )
     }
-
-    fun parseModelsList(jsonString: String): List<GeminiModel> {
-        return parseModelsPage(jsonString).models
-    }
-
-    private fun sanitizeHttpError(statusCode: Int, responseBody: String): String {
-        return when (statusCode) {
-            400 -> "Invalid request parameters."
-            401 -> "INVALID_API_KEY: API key is invalid."
-            403 -> "UNAUTHORIZED: API key is unauthorized or permission denied."
-            404 -> "MODEL_NOT_FOUND: Gemini endpoint or model was not found."
-            408 -> "Request timeout from server. Please try again."
-            429 -> "RATE_LIMITED: Gemini API rate limit reached."
-            in 500..599 -> "Gemini service temporarily unavailable."
-            else -> "HTTP $statusCode: Unexpected API error."
-        }
-    }
-
-    private fun parseGeminiResponseContent(jsonString: String): String {
-        return try {
-            val root = JSONObject(jsonString)
-            val candidates = root.optJSONArray("candidates")
-            if (candidates != null && candidates.length() > 0) {
-                val firstCandidate = candidates.getJSONObject(0)
-                val content = firstCandidate.optJSONObject("content")
-                val parts = content?.optJSONArray("parts")
-                if (parts != null && parts.length() > 0) {
-                    val sb = StringBuilder()
-                    for (i in 0 until parts.length()) {
-                        val text = parts.getJSONObject(i).optString("text", "")
-                        sb.append(text)
-                    }
-                    return sb.toString().trim()
-                }
-            }
-            ""
-        } catch (e: Exception) {
-            ""
-        }
-    }
-
-    private fun parseStructuredResponse(rawContent: String): Triple<String, List<String>, String> {
-        if (rawContent.isBlank()) {
-            return Triple("No response content returned by AI.", emptyList(), "")
-        }
-
-        try {
-            val cleanJson = rawContent.trim()
-                .removePrefix("```json")
-                .removePrefix("```JSON")
-                .removePrefix("```")
-                .removeSuffix("```")
-                .trim()
-
-            val json = JSONObject(cleanJson)
-            val summary = json.optString("summary", "").trim()
-            val observationsList = mutableListOf<String>()
-            val observationsArray = json.optJSONArray("observations")
-            if (observationsArray != null) {
-                for (i in 0 until observationsArray.length()) {
-                    val obs = observationsArray.optString(i, "").trim()
-                    if (obs.isNotEmpty()) {
-                        observationsList.add(obs)
-                    }
-                }
-            }
-            val conclusion = json.optString("conclusion", "").trim()
-
-            if (summary.isNotEmpty() || observationsList.isNotEmpty() || conclusion.isNotEmpty()) {
-                return Triple(summary, observationsList, conclusion)
-            }
-        } catch (ignored: Exception) {
-            // Fall back to line parser
-        }
-
-        val lines = rawContent.lines().map { it.trim() }.filter { it.isNotEmpty() }
-        val summaryBuffer = StringBuilder()
-        val observations = mutableListOf<String>()
-        val conclusionBuffer = StringBuilder()
-        var currentSection = ""
-
-        for (line in lines) {
-            val upper = line.uppercase()
-            when {
-                upper.startsWith("SUMMARY:") -> {
-                    currentSection = "summary"
-                    val content = line.substringAfter("SUMMARY:", "").trim().removePrefix("**").removeSuffix("**").trim()
-                    if (content.isNotEmpty()) summaryBuffer.append(content).append(" ")
-                }
-                upper.startsWith("OBSERVATIONS:") || upper.startsWith("OBSERVATION:") || upper.startsWith("FINDINGS:") -> {
-                    currentSection = "observations"
-                }
-                upper.startsWith("CONCLUSION:") || upper.startsWith("TAKEAWAYS:") || upper.startsWith("TAKEAWAY:") -> {
-                    currentSection = "conclusion"
-                }
-                else -> {
-                    when (currentSection) {
-                        "summary" -> summaryBuffer.append(line).append(" ")
-                        "observations" -> {
-                            val cleanLine = line.removePrefix("-").removePrefix("*").removePrefix("•").trim()
-                            if (cleanLine.isNotEmpty()) observations.add(cleanLine)
-                        }
-                        "conclusion" -> conclusionBuffer.append(line).append(" ")
-                        else -> {
-                            if (line.startsWith("-") || line.startsWith("*") || line.startsWith("•")) {
-                                observations.add(line.removePrefix("-").removePrefix("*").removePrefix("•").trim())
-                            } else if (summaryBuffer.isEmpty()) {
-                                summaryBuffer.append(line).append(" ")
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        val summary = summaryBuffer.toString().trim().ifEmpty {
-            rawContent.take(200) + if (rawContent.length > 200) "..." else ""
-        }
-        val conclusion = conclusionBuffer.toString().trim()
-
-        return Triple(summary, observations, conclusion)
-    }
-
-    private data class ResponseSummary(
-        val statusCode: Int,
-        val bodyString: String,
-        val isSuccess: Boolean,
-        val retryAfter: String?
-    )
 }
