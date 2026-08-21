@@ -8,8 +8,8 @@ import com.google.ai.edge.litertlm.EngineConfig
 import com.google.ai.edge.litertlm.SamplerConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.withContext
 import java.io.File
 
@@ -24,12 +24,12 @@ class LiteRtLmRuntime(private val context: Context) : LocalModelRuntime {
     private var conversation: com.google.ai.edge.litertlm.Conversation? = null
 
     @Volatile
-    private var loadedModelId: String? = null
+    private var loadedModel: LocalModel? = null
 
     override suspend fun load(model: LocalModel): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching {
             synchronized(lock) {
-                if (loadedModelId == model.id && engine?.isInitialized() == true) return@runCatching
+                if (loadedModel?.id == model.id && engine?.isInitialized() == true) return@runCatching
 
                 closeLocked()
 
@@ -45,7 +45,6 @@ class LiteRtLmRuntime(private val context: Context) : LocalModelRuntime {
                 val config = EngineConfig(
                     modelPath = modelFile.absolutePath,
                     backend = backend,
-                    maxNumTokens = model.configuration.maxTokens,
                     cacheDir = context.cacheDir.absolutePath
                 )
 
@@ -58,7 +57,7 @@ class LiteRtLmRuntime(private val context: Context) : LocalModelRuntime {
                 }
 
                 engine = newEngine
-                loadedModelId = model.id
+                loadedModel = model
             }
         }
     }
@@ -70,18 +69,17 @@ class LiteRtLmRuntime(private val context: Context) : LocalModelRuntime {
             emit(LocalAiEvent.Failed(IllegalStateException("No local model is loaded")))
             return@flow
         }
-        require(activeEngine.isInitialized()) { "Local model engine is not initialized" }
-
-        val config = synchronized(lock) {
-            val modelId = loadedModelId ?: error("No local model is loaded")
-            modelId to activeEngine.engineConfig
+        val model = loadedModel ?: run {
+            emit(LocalAiEvent.Failed(IllegalStateException("No local model is loaded")))
+            return@flow
         }
+        require(activeEngine.isInitialized()) { "Local model engine is not initialized" }
 
         val conversationConfig = ConversationConfig(
             samplerConfig = SamplerConfig(
-                topK = config.second.maxNumTokens?.coerceAtLeast(1) ?: 64,
-                topP = 0.95,
-                temperature = 1.0
+                topK = model.configuration.topK,
+                topP = model.configuration.topP,
+                temperature = model.configuration.temperature
             )
         )
 
@@ -91,7 +89,10 @@ class LiteRtLmRuntime(private val context: Context) : LocalModelRuntime {
         synchronized(lock) { conversation = activeConversation }
 
         try {
-            activeConversation.sendMessageAsync(prompt).collect { message ->
+            activeConversation.sendMessageAsync(
+                prompt,
+                maxOutputToken = model.configuration.maxTokens
+            ).collect { message ->
                 emit(LocalAiEvent.Token(message.toString()))
             }
             emit(LocalAiEvent.Completed)
@@ -125,6 +126,6 @@ class LiteRtLmRuntime(private val context: Context) : LocalModelRuntime {
         conversation = null
         runCatching { engine?.close() }
         engine = null
-        loadedModelId = null
+        loadedModel = null
     }
 }
