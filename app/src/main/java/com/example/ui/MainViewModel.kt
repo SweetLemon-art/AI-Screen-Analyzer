@@ -397,7 +397,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     override fun onCleared() {
         askAiJob?.cancel()
-        askAiAdmission.release()
         controller.stopMonitoring()
         getApplication<Application>().let { application ->
             ScreenCaptureService.stopService(application)
