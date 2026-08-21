@@ -1,12 +1,11 @@
 package com.example.localai
 
 import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Test
 
 class LocalAiConcurrencyTest {
@@ -28,8 +27,11 @@ class LocalAiConcurrencyTest {
         runtime.loadCalls.set(0)
 
         val first = async { provider.generate("first", byteArrayOf(1)).collect {} }
-        while (runtime.active.get() == 0) delay(1)
+        runtime.firstStarted.await()
+
         val second = async { provider.generate("second", byteArrayOf(2)).collect {} }
+        assertFalse(runtime.secondStarted.isCompleted)
+        assertEquals(0, runtime.completed.get())
 
         runtime.release()
         first.await()
@@ -47,11 +49,11 @@ class LocalAiConcurrencyTest {
         runtime.loadCalls.set(0)
 
         val generation = async { provider.generate("first", byteArrayOf(1)).collect {} }
-        while (runtime.active.get() == 0) delay(1)
+        runtime.firstStarted.await()
 
         val replacement = async { provider.selectModel(model.id) }
-        delay(10)
         assertEquals(0, runtime.loadCalls.get())
+        assertFalse(replacement.isCompleted)
 
         runtime.release()
         generation.await()
@@ -65,38 +67,47 @@ class LocalAiConcurrencyTest {
     }
 
     private class BlockingRuntime : LocalModelRuntime {
+        val firstStarted = CompletableDeferred<Unit>()
+        val secondStarted = CompletableDeferred<Unit>()
         val active = AtomicInteger(0)
         val maximumConcurrent = AtomicInteger(0)
         val completed = AtomicInteger(0)
         val loadCalls = AtomicInteger(0)
-        private var release = false
+        private val releaseGate = CompletableDeferred<Unit>()
+        private var generationCount = 0
 
         override suspend fun load(model: LocalModel): Result<Unit> {
             loadCalls.incrementAndGet()
             return Result.success(Unit)
         }
 
-        override fun generate(prompt: String, imageBytes: ByteArray): Flow<LocalAiEvent> = flow {
+        override fun generate(prompt: String, imageBytes: ByteArray) = kotlinx.coroutines.flow.flow {
+            val invocation = ++generationCount
+            if (invocation == 1) firstStarted.complete(Unit) else secondStarted.complete(Unit)
             val current = active.incrementAndGet()
             maximumConcurrent.updateAndGet { previous -> maxOf(previous, current) }
-            emit(LocalAiEvent.Started)
-            while (!release) delay(1)
-            emit(LocalAiEvent.Token(prompt))
-            emit(LocalAiEvent.Completed)
-            completed.incrementAndGet()
-            active.decrementAndGet()
+            try {
+                emit(LocalAiEvent.Started)
+                releaseGate.await()
+                emit(LocalAiEvent.Token(prompt))
+                emit(LocalAiEvent.Completed)
+                completed.incrementAndGet()
+            } finally {
+                active.decrementAndGet()
+            }
         }
 
-        override fun generate(prompt: String): Flow<LocalAiEvent> = generate(prompt, byteArrayOf(1))
+        override fun generate(prompt: String): kotlinx.coroutines.flow.Flow<LocalAiEvent> =
+            generate(prompt, byteArrayOf(1))
 
         override suspend fun unload() = Unit
 
         override suspend fun cancel() {
-            release = true
+            releaseGate.complete(Unit)
         }
 
         fun release() {
-            release = true
+            releaseGate.complete(Unit)
         }
     }
 }
