@@ -4,7 +4,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.runTest
-import org.junit.Assert.assertThrows
+import org.junit.Assert.assertNotNull
 import org.junit.Test
 
 class LocalAiFatalErrorRegressionTest {
@@ -23,9 +23,14 @@ class LocalAiFatalErrorRegressionTest {
         val provider = LocalAiProvider(FakeCatalog(model), runtime)
         provider.selectModel(model.id)
 
-        assertThrows(AssertionError::class.java) {
+        var thrown: AssertionError? = null
+        try {
             provider.generate("hello").toList()
+        } catch (error: AssertionError) {
+            thrown = error
         }
+
+        assertNotNull("fatal runtime error must propagate", thrown)
     }
 
     private class FakeCatalog(private val model: LocalModel) : LocalModelCatalog {
