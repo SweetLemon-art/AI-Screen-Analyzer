@@ -174,7 +174,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _askAiResult.value = aiProviderRouter.analyze(
                     bitmap = bitmap,
                     context = _currentContext.value,
-                    settings = _settings.value.copy(delaySeconds = 1)
+                    settings = _settings.value.copy(delaySeconds = 1),
+                    userPrompt = prompt
                 )
             } catch (error: Exception) {
                 _askAiResult.value = AnalysisResult(
