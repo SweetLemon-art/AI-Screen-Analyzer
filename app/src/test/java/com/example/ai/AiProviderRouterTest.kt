@@ -3,6 +3,7 @@ package com.example.ai
 import android.graphics.Bitmap
 import com.example.data.AnalysisContext
 import com.example.data.CaptureSettings
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -42,29 +43,30 @@ class AiProviderRouterTest {
     }
 
     @Test
-    fun duplicateProviderTypesUseLastRegistration() {
+    fun duplicateProviderTypesUseLastRegistration() = runBlocking {
         val first = FakeProvider(AiProviderType.GEMINI, "first")
         val second = FakeProvider(AiProviderType.GEMINI, "second")
         val router = AiProviderRouter(listOf(first, second))
 
-        assertEquals("second", router.providerForTest(AiProviderType.GEMINI).name)
+        val result = router.analyze(
+            bitmap = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888),
+            context = AnalysisContext.DEFAULT
+        )
+
+        assertEquals("second", result.summary)
     }
 
     private class FakeProvider(
         override val type: AiProviderType,
-        val name: String = type.name
+        private val response: String = type.name
     ) : AiProvider {
         override suspend fun analyze(
             bitmap: Bitmap,
             context: AnalysisContext,
             settings: CaptureSettings
-        ): AnalysisResult = AnalysisResult(contextName = context.name, summary = name)
+        ): AnalysisResult = AnalysisResult(
+            contextName = context.name,
+            summary = response
+        )
     }
-}
-
-private fun AiProviderRouter.providerForTest(type: AiProviderType): AiProvider {
-    return javaClass.getDeclaredField("providersByType").apply { isAccessible = true }
-        .get(this)
-        .let { it as Map<*, *> }
-        .getValue(type) as AiProvider
 }
