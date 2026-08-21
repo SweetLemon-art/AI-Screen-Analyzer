@@ -1,6 +1,9 @@
 package com.example.localai
 
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.sync.Mutex
@@ -19,18 +22,48 @@ class LocalAiProvider(
 ) {
     private var selectedModelId: String? = null
     private val operationMutex = Mutex()
+    private val _modelState = MutableStateFlow<LocalModelState>(LocalModelState.Idle)
+    val modelState: StateFlow<LocalModelState> = _modelState.asStateFlow()
 
-    suspend fun selectModel(modelId: String): Result<Unit> = operationMutex.withLock {
+    /**
+     * Selects a model safely. A model switch first requests cancellation of any
+     * active generation, then waits for the operation lock before replacing the
+     * runtime model. Selecting the already-loaded model is intentionally a no-op.
+     */
+    suspend fun selectModel(modelId: String): Result<Unit> {
         val model = modelCatalog.listModels().firstOrNull { it.id == modelId }
-            ?: return@withLock Result.failure(IllegalArgumentException("Local model not found: $modelId"))
+            ?: run {
+                _modelState.value = LocalModelState.Failed(
+                    IllegalArgumentException("Local model not found: $modelId")
+                )
+                return Result.failure(IllegalArgumentException("Local model not found: $modelId"))
+            }
 
-        // LiteRtLmRuntime closes the previous engine before initializing a new
-        // model. Clear the provider selection first so a failed load cannot leave
-        // the provider claiming that an unavailable model is still active.
-        selectedModelId = null
+        if (selectedModelId == model.id && _modelState.value == LocalModelState.Ready(model.id)) {
+            return Result.success(Unit)
+        }
 
-        runtime.load(model).onSuccess {
-            selectedModelId = model.id
+        // Cancellation deliberately does not take operationMutex, so an active
+        // generation can be interrupted before the switch waits for cleanup.
+        runtime.cancel()
+
+        return operationMutex.withLock {
+            if (selectedModelId == model.id && _modelState.value == LocalModelState.Ready(model.id)) {
+                return@withLock Result.success(Unit)
+            }
+
+            _modelState.value = LocalModelState.Switching(fromModelId = selectedModelId, toModelId = model.id)
+            selectedModelId = null
+
+            val loadResult = runtime.load(model)
+            loadResult.onSuccess {
+                selectedModelId = model.id
+                _modelState.value = LocalModelState.Ready(model.id)
+            }.onFailure { error ->
+                selectedModelId = null
+                _modelState.value = LocalModelState.Failed(error)
+            }
+            loadResult
         }
     }
 
@@ -61,16 +94,27 @@ class LocalAiProvider(
         }
     }
 
+    /**
+     * Cancellation must remain outside operationMutex so it can interrupt the
+     * generation that currently owns the mutex.
+     */
     suspend fun cancel() {
-        // Do not take operationMutex here. Cancellation must be able to interrupt
-        // the generation that currently owns the mutex.
         runtime.cancel()
     }
 
     suspend fun unload() = operationMutex.withLock {
         runtime.unload()
         selectedModelId = null
+        _modelState.value = LocalModelState.Idle
     }
 
     fun selectedModelId(): String? = selectedModelId
+}
+
+/** Observable lifecycle state for Local AI model ownership. */
+sealed interface LocalModelState {
+    data object Idle : LocalModelState
+    data class Switching(val fromModelId: String?, val toModelId: String) : LocalModelState
+    data class Ready(val modelId: String) : LocalModelState
+    data class Failed(val error: Throwable) : LocalModelState
 }
