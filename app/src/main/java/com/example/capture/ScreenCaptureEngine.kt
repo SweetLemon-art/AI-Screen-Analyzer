@@ -300,9 +300,13 @@ object ScreenCaptureEngine : ScreenCaptureProvider, ScreenCaptureLifecycleProvid
 
     @Synchronized
     fun stop() {
+        val hadActiveSession = mediaProjection != null || virtualDisplay != null || imageReader != null
         sessionGeneration.incrementAndGet()
         _isReady.value = false
         cleanupResourcesInternal()
         onProjectionStopCallback = null
+        if (hadActiveSession) {
+            onSessionStoppedListener?.invoke()
+        }
     }
 }
