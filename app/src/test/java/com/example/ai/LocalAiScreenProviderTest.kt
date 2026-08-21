@@ -3,6 +3,7 @@ package com.example.ai
 import android.graphics.Bitmap
 import com.example.data.AnalysisContext
 import com.example.localai.Accelerator
+import com.example.localai.LocalAiEvent
 import com.example.localai.LocalAiProvider
 import com.example.localai.LocalModel
 import com.example.localai.LocalModelCatalog
@@ -16,7 +17,12 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.fail
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
 
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [35])
 class LocalAiScreenProviderTest {
     @Test
     fun analyzePropagatesCancellationInsteadOfReturningFailure() = runBlocking {
@@ -30,9 +36,12 @@ class LocalAiScreenProviderTest {
             importedAtEpochMillis = 1L
         )
         val runtime = CancellationRuntime()
-        val delegate = LocalAiProvider(object : LocalModelCatalog {
-            override suspend fun listModels(): List<LocalModel> = listOf(model)
-        }, runtime)
+        val delegate = LocalAiProvider(
+            modelCatalog = object : LocalModelCatalog {
+                override suspend fun listModels(): List<LocalModel> = listOf(model)
+            },
+            runtime = runtime
+        )
         check(delegate.selectModel(model.id).isSuccess)
 
         val provider = LocalAiScreenProvider(delegate, generationTimeoutMs = 5_000L)
@@ -41,20 +50,21 @@ class LocalAiScreenProviderTest {
             provider.analyze(bitmap, AnalysisContext.DEFAULT)
             fail("CancellationException should propagate")
         } catch (_: CancellationException) {
-            // Expected: coroutine cancellation must never become AnalysisResult failure.
+            // Expected: cancellation is control flow and must not become AnalysisResult failure.
         } finally {
-            bitmap.recycle()
+            if (!bitmap.isRecycled) bitmap.recycle()
         }
     }
 
     private class CancellationRuntime : LocalModelRuntime {
         override suspend fun load(model: LocalModel): Result<Unit> = Result.success(Unit)
 
-        override fun generate(prompt: String): Flow<com.example.localai.LocalAiEvent> = cancelledFlow()
+        override fun generate(prompt: String): Flow<LocalAiEvent> = cancelledFlow()
 
-        override fun generate(prompt: String, imageBytes: ByteArray): Flow<com.example.localai.LocalAiEvent> = cancelledFlow()
+        override fun generate(prompt: String, imageBytes: ByteArray): Flow<LocalAiEvent> =
+            cancelledFlow()
 
-        private fun cancelledFlow(): Flow<com.example.localai.LocalAiEvent> = flow {
+        private fun cancelledFlow(): Flow<LocalAiEvent> = flow {
             throw CancellationException("test cancellation")
         }
 
