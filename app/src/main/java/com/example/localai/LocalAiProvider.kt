@@ -8,6 +8,7 @@ import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Application-facing Local AI provider.
@@ -20,7 +21,7 @@ class LocalAiProvider(
     private val modelCatalog: LocalModelCatalog,
     private val runtime: LocalModelRuntime
 ) {
-    private var selectedModelId: String? = null
+    private val selectedModelId = AtomicReference<String?>(null)
     private val operationMutex = Mutex()
     private val _modelState = MutableStateFlow<LocalModelState>(LocalModelState.Idle)
     val modelState: StateFlow<LocalModelState> = _modelState.asStateFlow()
@@ -33,13 +34,12 @@ class LocalAiProvider(
     suspend fun selectModel(modelId: String): Result<Unit> {
         val model = modelCatalog.listModels().firstOrNull { it.id == modelId }
             ?: run {
-                _modelState.value = LocalModelState.Failed(
-                    IllegalArgumentException("Local model not found: $modelId")
-                )
-                return Result.failure(IllegalArgumentException("Local model not found: $modelId"))
+                val error = IllegalArgumentException("Local model not found: $modelId")
+                _modelState.value = LocalModelState.Failed(error)
+                return Result.failure(error)
             }
 
-        if (selectedModelId == model.id && _modelState.value == LocalModelState.Ready(model.id)) {
+        if (selectedModelId.get() == model.id && _modelState.value == LocalModelState.Ready(model.id)) {
             return Result.success(Unit)
         }
 
@@ -48,19 +48,22 @@ class LocalAiProvider(
         runtime.cancel()
 
         return operationMutex.withLock {
-            if (selectedModelId == model.id && _modelState.value == LocalModelState.Ready(model.id)) {
+            if (selectedModelId.get() == model.id && _modelState.value == LocalModelState.Ready(model.id)) {
                 return@withLock Result.success(Unit)
             }
 
-            _modelState.value = LocalModelState.Switching(fromModelId = selectedModelId, toModelId = model.id)
-            selectedModelId = null
+            _modelState.value = LocalModelState.Switching(
+                fromModelId = selectedModelId.get(),
+                toModelId = model.id
+            )
+            selectedModelId.set(null)
 
             val loadResult = runtime.load(model)
             loadResult.onSuccess {
-                selectedModelId = model.id
+                selectedModelId.set(model.id)
                 _modelState.value = LocalModelState.Ready(model.id)
             }.onFailure { error ->
-                selectedModelId = null
+                selectedModelId.set(null)
                 _modelState.value = LocalModelState.Failed(error)
             }
             loadResult
@@ -69,7 +72,7 @@ class LocalAiProvider(
 
     fun generate(prompt: String): Flow<LocalAiEvent> = flow {
         operationMutex.withLock {
-            if (selectedModelId == null) {
+            if (selectedModelId.get() == null) {
                 emit(LocalAiEvent.Failed(IllegalStateException("No local model is selected")))
                 return@withLock
             }
@@ -81,7 +84,7 @@ class LocalAiProvider(
     /** Generates a local multimodal response from the selected model and image bytes. */
     fun generate(prompt: String, imageBytes: ByteArray): Flow<LocalAiEvent> = flow {
         operationMutex.withLock {
-            if (selectedModelId == null) {
+            if (selectedModelId.get() == null) {
                 emit(LocalAiEvent.Failed(IllegalStateException("No local model is selected")))
                 return@withLock
             }
@@ -104,11 +107,11 @@ class LocalAiProvider(
 
     suspend fun unload() = operationMutex.withLock {
         runtime.unload()
-        selectedModelId = null
+        selectedModelId.set(null)
         _modelState.value = LocalModelState.Idle
     }
 
-    fun selectedModelId(): String? = selectedModelId
+    fun selectedModelId(): String? = selectedModelId.get()
 }
 
 /** Observable lifecycle state for Local AI model ownership. */
