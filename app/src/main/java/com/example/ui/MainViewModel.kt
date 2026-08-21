@@ -190,7 +190,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun cancelAskAi() { askAiJob?.cancel() }
+    /**
+     * Stops both the Kotlin Ask AI coroutine and any provider-native operation.
+     * The provider cancellation runs in a sibling ViewModel coroutine so it remains
+     * executable after askAiJob is cancelled.
+     */
+    fun cancelAskAi() {
+        if (askAiJob?.isActive != true) return
+        viewModelScope.launch {
+            runCatching { aiProviderRouter.cancel() }
+        }
+        askAiJob?.cancel()
+    }
 
     fun selectModel(modelId: String) {
         val cleanModel = com.example.ai.normalizeModelId(modelId)
