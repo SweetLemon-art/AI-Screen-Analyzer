@@ -14,7 +14,8 @@ import kotlinx.coroutines.withContext
 import java.io.File
 
 /** LiteRT-LM implementation of the provider-neutral local model runtime. */
-class LiteRtLmRuntime(private val context: Context) : LocalModelRuntime {
+class LiteRtLmRuntime(context: Context) : LocalModelRuntime {
+    private val appContext = context.applicationContext
     private val lock = Any()
 
     @Volatile
@@ -33,19 +34,19 @@ class LiteRtLmRuntime(private val context: Context) : LocalModelRuntime {
 
                 closeLocked()
 
-                val modelFile = File(context.filesDir, "local_models/${model.id}/${model.fileName}")
+                val modelFile = File(appContext.filesDir, "local_models/${model.id}/${model.fileName}")
                 require(modelFile.isFile) { "Model file not found: ${model.fileName}" }
 
                 val backend = when (model.accelerator) {
                     Accelerator.CPU -> Backend.CPU()
                     Accelerator.GPU -> Backend.GPU()
-                    Accelerator.NPU -> Backend.NPU(context.applicationInfo.nativeLibraryDir)
+                    Accelerator.NPU -> Backend.NPU(appContext.applicationInfo.nativeLibraryDir)
                 }
 
                 val config = EngineConfig(
                     modelPath = modelFile.absolutePath,
                     backend = backend,
-                    cacheDir = context.cacheDir.absolutePath
+                    cacheDir = appContext.cacheDir.absolutePath
                 )
 
                 val newEngine = Engine(config)
@@ -65,28 +66,34 @@ class LiteRtLmRuntime(private val context: Context) : LocalModelRuntime {
     override fun generate(prompt: String): Flow<LocalAiEvent> = flow {
         require(prompt.isNotBlank()) { "Prompt must not be blank" }
 
-        val activeEngine = engine ?: run {
-            emit(LocalAiEvent.Failed(IllegalStateException("No local model is loaded")))
-            return@flow
-        }
-        val model = loadedModel ?: run {
-            emit(LocalAiEvent.Failed(IllegalStateException("No local model is loaded")))
-            return@flow
-        }
-        require(activeEngine.isInitialized()) { "Local model engine is not initialized" }
+        val activeEngine: Engine
+        val model: LocalModel
+        val activeConversation: com.google.ai.edge.litertlm.Conversation
 
-        val conversationConfig = ConversationConfig(
-            samplerConfig = SamplerConfig(
-                topK = model.configuration.topK,
-                topP = model.configuration.topP,
-                temperature = model.configuration.temperature
+        synchronized(lock) {
+            activeEngine = engine ?: run {
+                emit(LocalAiEvent.Failed(IllegalStateException("No local model is loaded")))
+                return@flow
+            }
+            model = loadedModel ?: run {
+                emit(LocalAiEvent.Failed(IllegalStateException("No local model is loaded")))
+                return@flow
+            }
+            check(activeEngine.isInitialized()) { "Local model engine is not initialized" }
+            check(conversation == null) { "A local AI generation is already running" }
+
+            val conversationConfig = ConversationConfig(
+                samplerConfig = SamplerConfig(
+                    topK = model.configuration.topK,
+                    topP = model.configuration.topP,
+                    temperature = model.configuration.temperature
+                )
             )
-        )
+            activeConversation = activeEngine.createConversation(conversationConfig)
+            conversation = activeConversation
+        }
 
         emit(LocalAiEvent.Started)
-
-        val activeConversation = activeEngine.createConversation(conversationConfig)
-        synchronized(lock) { conversation = activeConversation }
 
         try {
             activeConversation.sendMessageAsync(
