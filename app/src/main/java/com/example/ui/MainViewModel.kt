@@ -404,6 +404,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         askAiJob?.cancel()
         askAiAdmission.release()
         controller.stopMonitoring()
+        // ViewModel destruction must also terminate the independent foreground
+        // capture service so MediaProjection cannot outlive its UI owner.
+        ScreenCaptureService.stopService(getApplication<Application>())
         ScreenCaptureEngine.stop()
         super.onCleared()
     }
