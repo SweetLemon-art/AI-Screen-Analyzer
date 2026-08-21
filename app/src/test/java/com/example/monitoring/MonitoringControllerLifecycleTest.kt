@@ -64,6 +64,48 @@ class MonitoringControllerLifecycleTest {
         assertEquals(null, controller.lastCaptureTimestamp.value)
     }
 
+    @Test
+    fun burstLifecycleCommands_convergeToFinalStartState() = runTest {
+        val provider = LifecycleAwareCaptureProvider()
+        val controller = createController(provider, this)
+
+        controller.startMonitoring(
+            contextProvider = { AnalysisContext.DEFAULT },
+            settingsProvider = { CaptureSettings.DEFAULT.copy(delaySeconds = 1) }
+        )
+        controller.stopMonitoring()
+        controller.startMonitoring(
+            contextProvider = { AnalysisContext.DEFAULT },
+            settingsProvider = { CaptureSettings.DEFAULT.copy(delaySeconds = 1) }
+        )
+
+        runCurrent()
+        assertEquals(MonitoringState.Capturing, controller.state.value)
+    }
+
+    @Test
+    fun resetThenStart_convergesToNewMonitoringSession() = runTest {
+        val provider = LifecycleAwareCaptureProvider()
+        val controller = createController(provider, this)
+
+        controller.startMonitoring(
+            contextProvider = { AnalysisContext.DEFAULT },
+            settingsProvider = { CaptureSettings.DEFAULT.copy(delaySeconds = 1) }
+        )
+        runCurrent()
+        assertEquals(MonitoringState.Capturing, controller.state.value)
+
+        controller.resetState()
+        controller.startMonitoring(
+            contextProvider = { AnalysisContext.DEFAULT },
+            settingsProvider = { CaptureSettings.DEFAULT.copy(delaySeconds = 1) }
+        )
+
+        runCurrent()
+        assertEquals(MonitoringState.Capturing, controller.state.value)
+        assertEquals(0, controller.analysisCount.value)
+    }
+
     private fun createController(
         provider: LifecycleAwareCaptureProvider,
         testScope: TestScope
