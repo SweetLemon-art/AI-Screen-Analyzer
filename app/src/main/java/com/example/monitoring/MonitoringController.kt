@@ -86,9 +86,11 @@ class MonitoringController(
     private suspend fun handleLifecycleCommand(command: LifecycleCommand) {
         when (command) {
             is LifecycleCommand.Start -> {
-                val newSessionId = sessionCounter.incrementAndGet()
+                // Stop and fully join the previous session before allocating the new generation.
+                // The cleanup increments sessionCounter, so the new session ID must be allocated
+                // only after cleanup; otherwise the cleanup would invalidate the new ID itself.
                 stopActiveMonitoring()
-                if (newSessionId != sessionCounter.get()) return
+                val newSessionId = sessionCounter.incrementAndGet()
                 _state.value = MonitoringState.Starting
                 activeJob = coroutineScope.launch {
                     runMonitoringLoop(newSessionId, command.contextProvider, command.settingsProvider)
@@ -96,6 +98,8 @@ class MonitoringController(
             }
             is LifecycleCommand.Stop -> stopActiveMonitoring()
             is LifecycleCommand.Reset -> {
+                // Reset is serialized with the active job. Clear observable state only after the
+                // previous monitoring job has been cancelled and joined.
                 stopActiveMonitoring()
                 _latestBitmap.value = null
                 _latestResult.value = null
@@ -111,7 +115,12 @@ class MonitoringController(
         val job = activeJob
         if (job != null) {
             job.cancel()
-            try { job.join() } catch (_: CancellationException) { }
+            try {
+                job.join()
+            } catch (_: CancellationException) {
+                // The lifecycle worker itself remains active; cancellation of the monitoring job
+                // is expected and must not abort command processing.
+            }
             if (activeJob === job) activeJob = null
         }
         _state.value = MonitoringState.Idle
@@ -214,17 +223,11 @@ class MonitoringController(
     }
 
     /**
-     * Invalidate the current session and clear UI state immediately. The generation bump prevents
-     * an in-flight capture/analysis from publishing stale state after resetState() returns. The
-     * queued Reset performs serialized cancellation/join of the active monitoring Job.
+     * Queue reset behind the lifecycle worker. The worker invalidates and joins the active job
+     * before clearing observable state, preventing a stopped job from publishing stale values
+     * after resetState() has completed.
      */
     fun resetState() {
-        sessionCounter.incrementAndGet()
-        _state.value = MonitoringState.Idle
-        _latestBitmap.value = null
-        _latestResult.value = null
-        _analysisCount.value = 0
-        _lastCaptureTimestamp.value = null
         commandChannel.trySend(LifecycleCommand.Reset)
     }
 
