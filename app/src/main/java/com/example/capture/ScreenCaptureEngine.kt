@@ -85,6 +85,84 @@ object ScreenCaptureEngine : ScreenCaptureProvider, ScreenCaptureLifecycleProvid
         onSessionStoppedListener = listener
     }
 
+    /**
+     * Captures exactly one frame from the current ImageReader.
+     *
+     * The reader is captured before suspending so a concurrent resize can retire the old reader
+     * without closing it until this capture has completed. The session generation prevents late
+     * frames from an old MediaProjection session from being returned.
+     */
+    override suspend fun captureSingleFrame(): CaptureResult = captureMutex.withLock {
+        val reader = imageReader
+        val projection = mediaProjection
+        val generation = sessionGeneration.get()
+
+        if (!_isReady.value || reader == null || projection == null) {
+            return@withLock CaptureResult.Error("Screen capture session is not ready")
+        }
+
+        activeCaptureCount.incrementAndGet()
+        try {
+            withContext(Dispatchers.Main.immediate) {
+                withTimeoutOrNull(CAPTURE_TIMEOUT_MS) {
+                    suspendCancellableCoroutine<CaptureResult> { continuation ->
+                        val listener = ImageReader.OnImageAvailableListener { availableReader ->
+                            if (generation != sessionGeneration.get() || !continuation.isActive) {
+                                return@OnImageAvailableListener
+                            }
+
+                            val image = try {
+                                availableReader.acquireLatestImage()
+                            } catch (e: Exception) {
+                                if (continuation.isActive) {
+                                    continuation.resume(
+                                        CaptureResult.Error("Failed to acquire captured frame", e)
+                                    )
+                                }
+                                return@OnImageAvailableListener
+                            }
+
+                            if (image == null) return@OnImageAvailableListener
+
+                            val bitmap = ImageProcessor.convertImageToBitmap(image)
+                            if (!continuation.isActive) {
+                                bitmap?.let { if (!it.isRecycled) it.recycle() }
+                                return@OnImageAvailableListener
+                            }
+
+                            if (bitmap != null) {
+                                continuation.resume(CaptureResult.Success(bitmap))
+                            } else {
+                                continuation.resume(
+                                    CaptureResult.Error("Failed to convert captured frame to Bitmap")
+                                )
+                            }
+                        }
+
+                        reader.setOnImageAvailableListener(listener, mainHandler)
+                        continuation.invokeOnCancellation {
+                            reader.setOnImageAvailableListener(null, null)
+                        }
+                    }
+                } ?: CaptureResult.Error("Timed out waiting for a captured frame")
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            CaptureResult.Error("Screen capture failed", e)
+        } finally {
+            try {
+                reader.setOnImageAvailableListener(null, null)
+            } catch (ignored: Exception) {
+            }
+
+            activeCaptureCount.decrementAndGet()
+            synchronized(this@ScreenCaptureEngine) {
+                closeRetiredReadersIfIdle()
+            }
+        }
+    }
+
     @Synchronized
     fun initialize(
         context: Context,
@@ -309,4 +387,6 @@ object ScreenCaptureEngine : ScreenCaptureProvider, ScreenCaptureLifecycleProvid
             onSessionStoppedListener?.invoke()
         }
     }
+
+    private const val CAPTURE_TIMEOUT_MS = 3_000L
 }
